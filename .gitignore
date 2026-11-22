@@ -1,0 +1,19 @@
+# Secrets — NEVER commit
+.env
+*.env
+
+# Logs
+daemon.log
+*.log
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Database (state — exclude if you want a fresh start; include if you want to keep history)
+data/memory.sqlite
+
+# OS
+.DS_Store
+Thumbs.db
