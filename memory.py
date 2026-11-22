@@ -88,6 +88,14 @@ class MemoryManager:
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
 
+                CREATE TABLE IF NOT EXISTS strategy_failures (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    strategy_id TEXT NOT NULL,
+                    failure_count INTEGER NOT NULL DEFAULT 0,
+                    last_failure TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    reset_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+
                 CREATE TABLE IF NOT EXISTS rules (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     rule_text TEXT NOT NULL,
@@ -290,3 +298,32 @@ class MemoryManager:
                 ("strategy", target_id, f"{title}: {content}", None),
             )
             return cursor.lastrowid
+
+    def increment_strategy_failure(self, strategy_id: str) -> None:
+        """Increment failure counter for a strategy. If first failure, initialize to 1."""
+        with self._get_connection() as conn:
+            conn.execute("""
+                INSERT INTO strategy_failures (strategy_id, failure_count, last_failure, reset_at)
+                VALUES (?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ON CONFLICT(strategy_id) DO UPDATE SET
+                    failure_count = failure_count + 1,
+                    last_failure = CURRENT_TIMESTAMP
+            """, (strategy_id,))
+
+    def get_strategy_failure_count(self, strategy_id: str) -> int:
+        """Get the current failure count for a strategy (0 if not found)."""
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT failure_count FROM strategy_failures WHERE strategy_id = ?",
+                (strategy_id,),
+            ).fetchone()
+            return row[0] if row else 0
+
+    def reset_strategy_failure(self, strategy_id: str) -> None:
+        """Reset failure counter for a strategy after successful test pass."""
+        with self._get_connection() as conn:
+            conn.execute("""
+                UPDATE strategy_failures
+                SET failure_count = 0, reset_at = CURRENT_TIMESTAMP
+                WHERE strategy_id = ?
+            """, (strategy_id,))

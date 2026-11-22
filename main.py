@@ -355,6 +355,19 @@ def main():
             # D. Only trade if the strategy passes out-of-sample test.
             #    If it fails, self-improve immediately: retire it and mutate a new one.
             if not _test_passes(test_metrics):
+                # --- Circuit breaker: pause after consecutive failures ---
+                memory.increment_strategy_failure(current_strategy['id'])
+                fail_count = memory.get_strategy_failure_count(current_strategy['id'])
+                if fail_count >= 3:
+                    logger.warning(
+                        f"CIRCUIT BREAKER: Strategy {current_strategy['id'][:8]} has "
+                        f"{fail_count} consecutive failures. Pausing new strategy "
+                        f"generation for 24 hours."
+                    )
+                    logger.info("Iteration complete. Sleeping 24 hours.")
+                    time.sleep(24 * 3600)
+                    continue
+
                 logger.warning(
                     f"Strategy {current_strategy['id'][:8]} FAILED out-of-sample test: "
                     f"win_rate={test_metrics.get('win_rate', 0):.2%} "
@@ -400,6 +413,7 @@ def main():
                             f"sharpe={test_metrics.get('sharpe', 0):.2f}"
                         )
                         signals = _signals_from_test(test_signals_df)
+                        memory.reset_strategy_failure(current_strategy['id'])
                     else:
                         logger.warning(
                             f"Strategy STILL FAILED after rule fix — falling back to whole-strategy mutation."
@@ -426,6 +440,7 @@ def main():
                     f"win_rate={test_metrics.get('win_rate', 0):.2%} "
                     f"sharpe={test_metrics.get('sharpe', 0):.2f}"
                 )
+                memory.reset_strategy_failure(current_strategy['id'])
                 signals = _signals_from_test(test_signals_df)
 
             logger.info(
