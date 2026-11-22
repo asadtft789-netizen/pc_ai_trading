@@ -14,6 +14,11 @@ from strategy import BaseStrategy
 from backtester import Backtester
 from builtin_strategy import get_fallback_strategy
 
+# Runnable skills wired into the self-improvement loop.
+from skills.ml4t.advanced_ai.agent_state_memory import AgentState, EvidenceStore
+from skills.ml4t.risk_management.drift_detection import DriftDetector
+from skills.ml4t.risk_management.position_sizing import PositionSizer
+
 
 def _load_strategy_instance(strategy_row: Dict[str, Any]) -> Optional[BaseStrategy]:
     """Dynamically loads an LLM-generated strategy class from its stored code."""
@@ -154,22 +159,37 @@ def _try_rule_fix(mutator: StrategyMutator,
                   regime_label: str,
                   latest_prices: Dict[str, float],
                   test_df: pd.DataFrame,
-                  executor: StrategyExecutor) -> bool:
+                  executor: StrategyExecutor,
+                  drift_detector: DriftDetector) -> bool:
     """Attempt to fix exactly ONE rule that caused the out-of-sample failure.
 
     Returns True if a single rule was corrected and saved; False if no rule fix
     was applied (caller should fall back to whole-strategy mutation).
 
-    Logic: pick the failing rule most likely responsible — the last saved rule —
-    ask the LLM for a one-sentence correction targeting only that rule's weakness,
-    replace just that rule in memory (no strategy-code change), then return True.
+    The rule to fix is chosen by drift detection on real paper-trading outcomes:
+    only a rule whose recent trades underperform its own baseline is a candidate.
+    This means rules are decided/corrected based on paper trading results, and
+    only the single responsible rule is touched — never the whole strategy.
     """
     try:
         rules = memory.get_all_rules()
         if not rules:
             return False
 
-        failing_rule = rules[0]  # most recently saved rule
+        # Prefer the rule that drift detection flags as actually going wrong.
+        failing_rule = None
+        drifting = drift_detector.evaluate_all_rules(window_days=14, drift_threshold=0.20)
+        if drifting:
+            worst = drifting[0]
+            failing_rule = {'id': worst.rule_id, 'rule_text': worst.rule_text}
+            logger.info(
+                f"Drift flagged rule id={worst.rule_id} score={worst.drift_score:.2f}: "
+                f"{worst.recommendation}"
+            )
+        else:
+            # No drift data yet / nothing drifting: fall back to most recent rule.
+            failing_rule = rules[0]
+            logger.info("No drift signal — falling back to most recent rule for correction.")
 
         failing_trades = [t for t in memory.get_recent_trades(limit=20)
                           if t['strategy_id'] == current_strategy['id']]
@@ -208,6 +228,19 @@ def main():
     executor = StrategyExecutor(settings, risk_engine)
     mutator = StrategyMutator(settings, memory)
     backtester = Backtester(settings, risk_engine)
+
+    # Runnable skills (self-reflection + drift detection + position sizing).
+    agent_state = AgentState(task="self-evolving swing-trading daemon")
+    evidence_store = EvidenceStore(db_path="data/agent_state.sqlite")
+    drift_detector = DriftDetector(memory=memory, db_path="data/drift.sqlite")
+    position_sizer = PositionSizer(
+        max_risk_per_trade=0.02,
+        kelly_cap=0.25,
+        min_notional=float(settings.risk.max_order_size_usd or 1.0),
+    )
+
+    # Checkpoint agent state at startup so learning resumes across restarts.
+    evidence_store.save_state(agent_state)
 
     logger.info("Orchestrator daemon started.")
 
@@ -337,6 +370,7 @@ def main():
                 rule_fixed = _try_rule_fix(
                     mutator, memory, current_strategy, test_metrics,
                     test_signals_df, regime["label"], latest_prices, test_df, executor,
+                    drift_detector,
                 )
                 if rule_fixed:
                     logger.info("Rule-level fix applied — re-testing the same strategy with corrected rules.")
@@ -433,6 +467,18 @@ def main():
                     f"EXIT {ev['reason']}: {sym} {ev['side']} qty={ev['qty']} "
                     f"price={ev['price']:.2f} pnl={ev['pnl']:.2f} strategy={current_strategy['id'][:8]}"
                 )
+                # Record outcome against each rule for drift detection (paper-trading based).
+                try:
+                    for rule in memory.get_all_rules():
+                        drift_detector.record_outcome(
+                            rule_id=rule['id'],
+                            rule_text=rule['rule_text'],
+                            trade_id=str(ev['symbol'] + ev['price']),
+                            pnl=float(ev['pnl']),
+                            trade_date=datetime.now(),
+                        )
+                except Exception as e:
+                    logger.debug(f"Drift outcome record skipped: {e}")
 
             # G. Reconcile DB open trades with Alpaca (mark filled if position gone)
             reconciled = executor.reconcile_trades(open_trades, latest_prices)
@@ -448,13 +494,30 @@ def main():
                 open_events = executor.sync_positions(signals)
                 for event in open_events:
                     if event["type"] == "open":
-                        qty = event["qty"]
                         price = event["price"]
-                        if qty <= 0:
-                            px = latest_prices.get(event["symbol"]) or _latest_close_for_symbol(test_df, event["symbol"]) or 0.0
-                            qty = settings.risk.max_order_size_usd / max(px, 0.01)
                         if price <= 0:
                             price = latest_prices.get(event["symbol"]) or _latest_close_for_symbol(test_df, event["symbol"]) or 0.0
+
+                        # Position sizing from real paper-trading outcomes (Kelly + risk cap).
+                        metrics = memory.get_trade_metrics()
+                        win_rate = metrics.get("win_rate", 0.0)
+                        avg_pnl = metrics.get("avg_pnl", 0.0)
+                        avg_win = avg_pnl if avg_pnl > 0 else 1.0
+                        avg_loss = abs(avg_pnl) if avg_pnl < 0 else 1.0
+                        equity = float(settings.risk.max_capital_usd)
+                        sizing = position_sizer.size(
+                            equity_usd=equity,
+                            win_rate=win_rate,
+                            avg_win_usd=avg_win,
+                            avg_loss_usd=avg_loss,
+                            price=price,
+                        )
+                        qty = sizing.qty
+                        logger.info(
+                            f"Position sizing: {sizing.reason} notional=${sizing.notional_usd:.2f} "
+                            f"qty={sizing.qty:.4f} kelly={sizing.kelly_fraction:.3f}"
+                        )
+
                         memory.log_trade_open(
                             order_id=str(event["order_id"]),
                             strategy_id=current_strategy['id'],
