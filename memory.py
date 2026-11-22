@@ -100,7 +100,7 @@ class MemoryManager:
     def save_strategy(self, strategy_id: str, name: str, code: str, parent_id: Optional[str] = None, generation: int = 0):
         with self._get_connection() as conn:
             conn.execute(
-                "INSERT INTO strategies (id, name, code, parent_id, generation) VALUES (?, ?, ?, ?, ?)",
+                "INSERT OR REPLACE INTO strategies (id, name, code, parent_id, generation) VALUES (?, ?, ?, ?, ?)",
                 (strategy_id, name, code, parent_id, generation)
             )
 

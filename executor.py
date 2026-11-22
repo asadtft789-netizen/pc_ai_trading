@@ -44,6 +44,22 @@ class StrategyExecutor:
             for symbol, signal in signals.items():
                 current_pos = positions.get(symbol)
 
+                # Close any opposing position before opening a new one
+                if current_pos and signal != 0:
+                    side_is_long = signal == 1
+                    current_is_long = float(current_pos.qty) > 0
+                    if side_is_long != current_is_long:
+                        self._close_position(symbol)
+                        events.append({
+                            "type": "close",
+                            "symbol": symbol,
+                            "side": current_pos.side,
+                            "qty": float(current_pos.qty),
+                            "price": float(current_pos.avg_entry_price) if getattr(current_pos, 'avg_entry_price', None) else 0.0,
+                            "pnl": float(getattr(current_pos, 'unrealized_pl', 0) or 0),
+                        })
+                        current_pos = None  # Position closed, will open fresh below
+
                 if signal == 0:
                     if current_pos:
                         events.append({
@@ -207,7 +223,11 @@ class StrategyExecutor:
                 updated.append({**trade, 'price': price, 'pnl': pnl, 'status': 'filled'})
             else:
                 price = float(getattr(pos, 'current_price', 0) or 0)
-                updated.append({**trade, 'price': price, 'pnl': float(getattr(pos, 'unrealized_pl', 0) or 0), 'status': 'open'})
+                if side == 'buy':
+                    pnl = (price - entry_price) * qty
+                else:
+                    pnl = (entry_price - price) * qty
+                updated.append({**trade, 'price': price, 'pnl': pnl, 'status': 'open'})
 
         return updated
 

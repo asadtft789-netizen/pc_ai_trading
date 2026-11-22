@@ -86,7 +86,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 logger = logging.getLogger("Orchestrator")
 
 
-def _retire_and_mutate(strategy_row, memory, mutator, fallback_fn, latest_prices, test_df, regime_label):
+def _retire_and_mutate(strategy_row, memory, mutator, fallback_fn, executor, latest_prices, test_df, regime_label):
     """Retire a failing/crashing strategy, close its positions, and mutate a replacement."""
     sid = strategy_row['id']
     # Close all positions for the failing strategy
@@ -236,7 +236,7 @@ def main():
             instance = _load_strategy_instance(current_strategy)
             if instance is None:
                 logger.error("Could not load strategy instance — treating as test failure, mutating.")
-                _retire_and_mutate(current_strategy, memory, mutator, get_fallback_strategy, latest_prices, test_df, regime["label"])
+                _retire_and_mutate(current_strategy, memory, mutator, get_fallback_strategy, executor, latest_prices, test_df, regime["label"])
                 logger.info("Iteration complete. Sleeping 1 hour.")
                 time.sleep(3600)
                 continue
@@ -251,7 +251,7 @@ def main():
                 _log_backtest_detail("TEST (held-out) backtest", test_metrics)
             except Exception as e:
                 logger.error(f"Strategy {current_strategy['id'][:8]} crashed backtester: {e} — treating as test failure, mutating.")
-                _retire_and_mutate(current_strategy, memory, mutator, get_fallback_strategy, latest_prices, test_df, regime["label"])
+                _retire_and_mutate(current_strategy, memory, mutator, get_fallback_strategy, executor, latest_prices, test_df, regime["label"])
                 logger.info("Iteration complete. Sleeping 1 hour.")
                 time.sleep(3600)
                 continue
@@ -272,7 +272,7 @@ def main():
                 )
                 current_strategy = _retire_and_mutate(
                     current_strategy, memory, mutator, get_fallback_strategy,
-                    latest_prices, test_df, regime["label"]
+                    executor, latest_prices, test_df, regime["label"]
                 )
                 logger.info("Iteration complete. Sleeping 1 hour.")
                 time.sleep(3600)

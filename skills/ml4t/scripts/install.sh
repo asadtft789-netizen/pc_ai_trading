@@ -1,0 +1,202 @@
+#!/usr/bin/env bash
+# Install the ML4T skills into an agent's skill directory.
+#
+# Skill discovery is one level deep: an agent looks for
+# <skills-dir>/<skill-name>/SKILL.md and does not recurse. This repo groups
+# skills into category directories for readability, so the categories have to be
+# flattened at install time. That is all this script does.
+#
+#   ./scripts/install.sh                      # ~/.claude/skills, symlinks
+#   ./scripts/install.sh .agents/skills       # a different target
+#   ./scripts/install.sh --copy               # default target, copies
+#   ./scripts/install.sh ~/.claude/skills --copy
+#   ./scripts/install.sh --prune              # also remove skills we no longer ship
+#   ./scripts/install.sh --uninstall          # remove every skill we installed
+#
+# Symlinks are the default so that `git pull` updates every installed skill.
+# Use --copy when the target must not depend on this checkout.
+#
+# Renaming or dropping a skill leaves the old install behind, because a plain
+# run only ever writes the names it is shipping now. --prune deletes those
+# leftovers, and --uninstall deletes the whole install. Both refuse to touch
+# anything this script did not create.
+
+set -euo pipefail
+shopt -s nullglob
+
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+MARKER=".ml4t-installed"   # written into every copy, so a rerun knows it is ours
+TARGET=""
+COPY=0
+PRUNE=0
+UNINSTALL=0
+
+# --copy is a flag, not a positional, so that `install.sh --copy` does not
+# quietly create a directory named "--copy".
+for arg in "$@"; do
+    case "$arg" in
+        --copy) COPY=1 ;;
+        --prune) PRUNE=1 ;;
+        --uninstall) UNINSTALL=1 ;;
+        -h|--help)
+            awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' \
+                "${BASH_SOURCE[0]}"
+            exit 0
+            ;;
+        -*) echo "unknown option: $arg" >&2; exit 2 ;;
+        *)
+            if [ -n "$TARGET" ]; then
+                echo "expected at most one target directory, got '$TARGET' and '$arg'" >&2
+                exit 2
+            fi
+            TARGET="$arg"
+            ;;
+    esac
+done
+TARGET="${TARGET:-$HOME/.claude/skills}"
+
+skills=("$REPO"/*/*/SKILL.md)
+if [ ${#skills[@]} -eq 0 ]; then
+    echo "no SKILL.md files found under $REPO" >&2
+    exit 1
+fi
+
+wanted=()
+for skill in "${skills[@]}"; do
+    wanted+=("ml4t-$(basename "$(dirname "$skill")")")
+done
+
+shipping() {
+    local name
+    for name in "${wanted[@]}"; do
+        [ "$name" = "$1" ] && return 0
+    done
+    return 1
+}
+
+# Two ways a destination can be ours: a symlink into this checkout, or a copy
+# carrying the marker this script wrote. Matching on the SKILL.md contents
+# instead would claim a skill someone copied in by hand and edited, since that
+# file carries the same `name:`. Nothing else is ever replaced or deleted.
+# Print a symlink's target as an absolute path. One level is all this script has
+# to inspect: `readlink -f` would also canonicalise, but it is GNU-only, and the
+# only thing that needs it here is a relative target, which is resolved against
+# the link's own directory. Prints nothing, and fails, for a non-link.
+link_target() {
+    local link="$1" target
+    target="$(readlink "$link" 2>/dev/null)" || return 1
+    [ -n "$target" ] || return 1
+    case "$target" in
+        /*) printf '%s\n' "$target" ;;
+        *) printf '%s\n' "$(cd "$(dirname "$link")" 2>/dev/null && pwd)/$target" ;;
+    esac
+}
+
+owned() {
+    local dest="$1"
+    if [ -L "$dest" ]; then
+        # The target is read raw, so a link left behind by a renamed or deleted
+        # skill is still recognised as ours even though it resolves to nothing.
+        case "$(link_target "$dest")" in "$REPO"/*) return 0 ;; esac
+        return 1
+    fi
+    [ -f "$dest/$MARKER" ]
+}
+
+removed=0
+if [ "$PRUNE" -eq 1 ] || [ "$UNINSTALL" -eq 1 ]; then
+    for dest in "$TARGET"/ml4t-*; do
+        name="$(basename "$dest")"
+        if [ "$UNINSTALL" -eq 0 ] && shipping "$name"; then
+            continue    # still shipped, so the install loop below will refresh it
+        fi
+        owned "$dest" || continue
+        rm -rf -- "$dest"
+        removed=$((removed + 1))
+    done
+fi
+
+if [ "$UNINSTALL" -eq 1 ]; then
+    echo "removed $removed skills from $TARGET"
+    exit 0
+fi
+
+mkdir -p "$TARGET"
+
+installed=0
+current=0
+replaced=0
+conflicts=0
+for skill in "${skills[@]}"; do
+    dir="$(dirname "$skill")"
+    name="ml4t-$(basename "$dir")"
+    dest="$TARGET/$name"
+
+    if [ -e "$dest" ] || [ -L "$dest" ]; then
+        if ! owned "$dest"; then
+            # Not ours: leave it alone, but this skill is now missing from the
+            # install, so the run must not report success.
+            echo "conflict: $name already exists at $dest and is not ours" >&2
+            conflicts=$((conflicts + 1))
+            continue
+        fi
+        if [ "$COPY" -eq 0 ] && [ -L "$dest" ] \
+           && [ "$(link_target "$dest")" = "$dir" ]; then
+            current=$((current + 1))     # same mode, same target: nothing to do
+            continue
+        fi
+        replaced=$((replaced + 1))
+    fi
+
+    if [ "$COPY" -eq 1 ]; then
+        # Stage the whole copy first and only then swap, keeping the previous
+        # install until the new one is in place: an interrupted or failed run
+        # must never leave the target without a working skill.
+        staging="$(mktemp -d "$TARGET/.staging-$name.XXXXXX")"
+        cp -r "$dir" "$staging/$name"
+        printf 'installed by %s\n' "$REPO/scripts/install.sh" > "$staging/$name/$MARKER"
+        if [ -e "$dest" ]; then
+            mv "$dest" "$staging/previous"
+        fi
+        # No POSIX call swaps two directories atomically, so put the previous
+        # install back if the second move fails rather than leaving nothing.
+        mv "$staging/$name" "$dest" || {
+            [ -e "$staging/previous" ] && mv "$staging/previous" "$dest"
+            echo "failed to install $name; previous install restored" >&2
+            exit 1
+        }
+        rm -rf "$staging"
+    else
+        # A real directory has to be moved aside first, because `ln -s` into an
+        # existing directory creates the link inside it rather than replacing it.
+        # What is left at $dest is then either nothing or a symlink, and `ln -sfn`
+        # handles both: `mv` would follow a symlink pointing at a directory and
+        # move the new link into its target, and `mv -T`, which avoids that, is
+        # GNU coreutils only. The copy is put back if the swap fails.
+        backup=""
+        if [ -d "$dest" ] && [ ! -L "$dest" ]; then
+            backup="$(mktemp -d "$TARGET/.staging-$name.XXXXXX")"
+            mv "$dest" "$backup/previous"
+        fi
+        if ! ln -sfn "$dir" "$dest"; then
+            [ -n "$backup" ] && mv "$backup/previous" "$dest"
+            rm -rf "$backup"
+            echo "failed to install $name; previous install restored" >&2
+            exit 1
+        fi
+        rm -rf "$backup"
+    fi
+    installed=$((installed + 1))
+done
+
+summary="installed $installed skills into $TARGET ($current already current, $replaced replaced"
+if [ "$PRUNE" -eq 1 ]; then
+    summary="$summary, $removed pruned"
+fi
+echo "$summary)"
+echo "each is available as ml4t-<skill-name>, for example /ml4t-data-leakage"
+
+if [ "$conflicts" -gt 0 ]; then
+    echo "$conflicts skill(s) not installed: the name was taken. Resolve and re-run." >&2
+    exit 1
+fi

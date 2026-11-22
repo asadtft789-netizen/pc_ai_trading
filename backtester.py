@@ -24,6 +24,14 @@ class Backtester:
         self.settings = settings
         self.risk_engine = risk_engine
         self.position_usd = settings.risk.max_order_size_usd
+        # Round-trip cost as a fraction of notional: spread + slippage + commission.
+        round_trip_bps = (
+            settings.risk.spread_bps + settings.risk.slippage_bps
+        )
+        comm_per_order = settings.risk.commission_per_order_usd
+        self.round_trip_cost_usd = (
+            self.position_usd * round_trip_bps / 10000.0 + 2 * comm_per_order
+        )
 
     def run(self, strategy: BaseStrategy, df: pd.DataFrame) -> Dict[str, Any]:
         """Backtest a strategy on a multi-index (timestamp, symbol) DataFrame.
@@ -56,6 +64,11 @@ class Backtester:
                 ret = close.pct_change()
                 strat_ret = position.shift(1).fillna(0.0) * ret
 
+                # Deduct realistic round-trip trading cost at each entry (position change).
+                entry_bars = (position != 0) & (position.shift(1).fillna(0.0) != position)
+                cost_frac = self.round_trip_cost_usd / max(self.position_usd, 1e-9)
+                strat_ret = strat_ret - entry_bars.astype(float) * cost_frac
+
                 # Detect trades: entry when position goes 0 -> nonzero; exit when nonzero -> 0 or flips.
                 in_trade = position != 0
                 trade_starts = in_trade & (~in_trade.shift(1).fillna(False))
@@ -70,11 +83,22 @@ class Backtester:
                     if trade_starts.iloc[i] and start_idx is None:
                         start_idx = i
                     elif trade_ends.iloc[i] and start_idx is not None:
+                        # Handle both tuple and non-tuple index formats
+                        def get_index(i):
+                            if isinstance(group.index[i], tuple):
+                                return group.index[i][1]
+                            return group.index[i]
+
                         entry_px = float(close.iloc[start_idx])
                         exit_px = float(close.iloc[i])
                         entry_pos = float(position.iloc[start_idx])
-                        pnl_pct = (exit_px - entry_px) / entry_px if entry_pos > 0 else (entry_px - exit_px) / entry_px
-                        trade_pnl = pnl_pct * self.position_usd
+                        # Calculate PnL percentage correctly based on direction
+                        if entry_pos > 0:  # LONG position
+                            pnl_pct = (exit_px - entry_px) / entry_px
+                        else:  # SHORT position
+                            pnl_pct = (entry_px - exit_px) / entry_px
+                        # Deduct round-trip trading cost from per-trade PnL
+                        trade_pnl = pnl_pct * self.position_usd - self.round_trip_cost_usd
                         direction = "LONG" if entry_pos > 0 else "SHORT"
                         # Was the direction right? price moved in trade's favor at exit
                         direction_right = (exit_px > entry_px) if entry_pos > 0 else (exit_px < entry_px)
@@ -98,7 +122,8 @@ class Backtester:
                     exit_px = float(close.iloc[-1])
                     entry_pos = float(position.iloc[start_idx])
                     pnl_pct = (exit_px - entry_px) / entry_px if entry_pos > 0 else (entry_px - exit_px) / entry_px
-                    trade_pnl = pnl_pct * self.position_usd
+                    # Deduct round-trip trading cost from per-trade PnL
+                    trade_pnl = pnl_pct * self.position_usd - self.round_trip_cost_usd
                     direction = "LONG" if entry_pos > 0 else "SHORT"
                     direction_right = (exit_px > entry_px) if entry_pos > 0 else (exit_px < entry_px)
                     all_trade_pnls.append(trade_pnl)
