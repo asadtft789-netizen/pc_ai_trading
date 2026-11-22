@@ -307,6 +307,63 @@ Return ONLY the Python code for the new strategy class. Do not include explanati
             logger.error(f"Error generating strategy: {e}")
             return None
 
+    def generate_rule_correction(self,
+                                 failing_rule: str,
+                                 failing_trades: List[Dict[str, Any]],
+                                 metrics: Dict[str, Any],
+                                 regime_label: str) -> Optional[str]:
+        """Ask the LLM what ONE specific change should be made to this rule.
+
+        Targeted fix: only this rule is considered for replacement. The strategy
+        code itself is NOT touched unless the rule fix fails validation.
+        Returns: corrected rule text (already stripped of 'Rule:' prefix), or None.
+        """
+        trade_lines = []
+        for t in failing_trades:
+            pnl = t.get('pnl')
+            pnl_str = f"pnl={pnl}" if pnl is not None else "pnl=unknown"
+            trade_lines.append(
+                f"{t['symbol']} {t['side']} qty={t['qty']} entry={t.get('entry_price')} "
+                f"exit={t.get('exit_price')} {pnl_str} status={t['status']}"
+            )
+
+        prompt = f"""
+You are reviewing ONE failing rule from an autonomous swing-trading bot.
+
+Strategy context:
+- Market Regime: {regime_label}
+- Performance Metrics: {json.dumps(metrics)}
+
+THE FAILING RULE (this is the only thing we are allowed to change):
+\"\"\"{failing_rule}\"\"\"
+
+Recent trades associated with this rule's strategy:
+{chr(10).join(trade_lines) if trade_lines else "No trades executed."}
+
+Based on what worked and what didn't, propose exactly ONE corrected version of this rule.
+Constraints:
+- Keep it to ONE sentence.
+- Start with "Rule: ".
+- Do NOT invent new rules for other symptoms — only fix this specific rule's weakness.
+- Do NOT rewrite the whole strategy.
+Return ONLY the corrected rule sentence, nothing else.
+"""
+
+        try:
+            text = self._chat_complete(
+                model=self.settings.llm.model,
+                max_tokens=300,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            text = text.strip()
+            if text.lower().startswith("rule:"):
+                text = text[len("rule:"):].strip()
+            return text if text else None
+
+        except Exception as e:
+            logger.error(f"Error generating rule correction: {e}")
+            return None
+
     def generate_lesson(self, strategy_id: str, trades: List[Dict[str, Any]],
                         metrics: Dict[str, Any], regime_label: str) -> Optional[str]:
         """Ask the LLM what to learn from this strategy's recent trades and metrics."""

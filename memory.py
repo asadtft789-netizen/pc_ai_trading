@@ -273,6 +273,16 @@ class MemoryManager:
             "avg_pnl": sum(pnls) / len(pnls),
         }
 
+    def update_rule_by_text(self, old_text: str, new_text: str) -> bool:
+        """Replace an existing rule's text in-place (targeted fix, not append).
+        Returns True if a row was updated, False if no matching rule found."""
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                "UPDATE rules SET rule_text = ? WHERE rule_text = ?",
+                (new_text, old_text),
+            )
+            return cursor.rowcount > 0
+
     def log_reflection(self, target_id: str, title: str, content: str) -> Optional[int]:
         with self._get_connection() as conn:
             cursor = conn.execute(

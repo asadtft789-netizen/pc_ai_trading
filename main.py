@@ -136,6 +136,69 @@ def _retire_and_mutate(strategy_row, memory, mutator, fallback_fn, executor, lat
     return current_strategy
 
 
+def _signals_from_test(test_signals_df: pd.DataFrame) -> Dict[str, int]:
+    """Convert the most recent signal per symbol from the test DataFrame."""
+    signals: Dict[str, int] = {}
+    if 'signal' in test_signals_df.columns:
+        for symbol, group in test_signals_df.groupby(level='symbol'):
+            last_signal = int(group['signal'].iloc[-1])
+            signals[symbol] = last_signal
+    return signals
+
+
+def _try_rule_fix(mutator: StrategyMutator,
+                  memory: MemoryManager,
+                  current_strategy: Dict[str, Any],
+                  test_metrics: Dict[str, Any],
+                  test_signals_df: pd.DataFrame,
+                  regime_label: str,
+                  latest_prices: Dict[str, float],
+                  test_df: pd.DataFrame,
+                  executor: StrategyExecutor) -> bool:
+    """Attempt to fix exactly ONE rule that caused the out-of-sample failure.
+
+    Returns True if a single rule was corrected and saved; False if no rule fix
+    was applied (caller should fall back to whole-strategy mutation).
+
+    Logic: pick the failing rule most likely responsible — the last saved rule —
+    ask the LLM for a one-sentence correction targeting only that rule's weakness,
+    replace just that rule in memory (no strategy-code change), then return True.
+    """
+    try:
+        rules = memory.get_all_rules()
+        if not rules:
+            return False
+
+        failing_rule = rules[0]  # most recently saved rule
+
+        failing_trades = [t for t in memory.get_recent_trades(limit=20)
+                          if t['strategy_id'] == current_strategy['id']]
+        corrected = mutator.generate_rule_correction(
+            failing_rule=failing_rule.get('rule_text', failing_rule.get('text', '')),
+            failing_trades=failing_trades,
+            metrics=test_metrics,
+            regime_label=regime_label,
+        )
+        if not corrected:
+            return False
+
+        # Targeted update: replace ONLY this rule's text in-place
+        old_text = failing_rule.get('rule_text') or failing_rule.get('text')
+        if old_text:
+            updated = memory.update_rule_by_text(old_text, corrected)
+            logger.info(
+                f"Rule fix applied: replaced [{old_text[:60]}...] -> "
+                f"[{corrected[:60]}...] (updated={updated})"
+            )
+            # Save as a new rule too so the lesson is captured even if text match failed
+            memory.save_rule(f"Rule: {corrected}", source_reflection_id=None)
+            return True
+        return False
+    except Exception as e:
+        logger.error(f"Rule fix attempt errored: {e}")
+        return False
+
+
 def main():
     # 1. Initialize components
     settings = Settings.load(env_path=".env")
@@ -264,32 +327,84 @@ def main():
                     f"win_rate={test_metrics.get('win_rate', 0):.2%} "
                     f"sharpe={test_metrics.get('sharpe', 0):.2f} "
                     f"return={test_metrics.get('total_return_pct', 0):.2%}. "
-                    f"Not trading — self-improving via mutation."
                 )
                 memory.log_reflection(
                     current_strategy['id'], "Out-of-sample Fail",
                     json.dumps(test_metrics)
                 )
-                current_strategy = _retire_and_mutate(
-                    current_strategy, memory, mutator, get_fallback_strategy,
-                    executor, latest_prices, test_df, regime["label"]
+
+                # --- Targeted rule fix FIRST: try to fix just the responsible rule ---
+                rule_fixed = _try_rule_fix(
+                    mutator, memory, current_strategy, test_metrics,
+                    test_signals_df, regime["label"], latest_prices, test_df, executor,
                 )
-                logger.info("Iteration complete. Sleeping 1 hour.")
-                time.sleep(3600)
-                continue
+                if rule_fixed:
+                    logger.info("Rule-level fix applied — re-testing the same strategy with corrected rules.")
+                    # Re-run tests with the updated rules (strategy code unchanged)
+                    try:
+                        train_signals_df = instance.generate_signals(train_df)
+                        bt_metrics = backtester.run(instance, train_signals_df)
+                        _log_backtest_detail("Train backtest (after rule fix)", bt_metrics)
+
+                        test_signals_df = instance.generate_signals(test_df)
+                        test_metrics = backtester.run(instance, test_signals_df)
+                        _log_backtest_detail("TEST (held-out) backtest (after rule fix)", test_metrics)
+                    except Exception as e:
+                        logger.error(f"Re-test after rule fix crashed: {e}")
+                        current_strategy = _retire_and_mutate(
+                            current_strategy, memory, mutator, get_fallback_strategy,
+                            executor, latest_prices, test_df, regime["label"]
+                        )
+                        logger.info("Iteration complete. Sleeping 1 hour.")
+                        time.sleep(3600)
+                        continue
+
+                    if _test_passes(test_metrics):
+                        logger.info(
+                            f"Strategy PASSED out-of-sample test after rule fix — "
+                            f"win_rate={test_metrics.get('win_rate', 0):.2%} "
+                            f"sharpe={test_metrics.get('sharpe', 0):.2f}"
+                        )
+                        signals = _signals_from_test(test_signals_df)
+                    else:
+                        logger.warning(
+                            f"Strategy STILL FAILED after rule fix — falling back to whole-strategy mutation."
+                        )
+                        current_strategy = _retire_and_mutate(
+                            current_strategy, memory, mutator, get_fallback_strategy,
+                            executor, latest_prices, test_df, regime["label"]
+                        )
+                        logger.info("Iteration complete. Sleeping 1 hour.")
+                        time.sleep(3600)
+                        continue
+                else:
+                    # No rule found to fix; fall back to whole-strategy mutation
+                    current_strategy = _retire_and_mutate(
+                        current_strategy, memory, mutator, get_fallback_strategy,
+                        executor, latest_prices, test_df, regime["label"]
+                    )
+                    logger.info("Iteration complete. Sleeping 1 hour.")
+                    time.sleep(3600)
+                    continue
+            else:
+                logger.info(
+                    f"Strategy {current_strategy['id'][:8]} PASSED out-of-sample test — "
+                    f"win_rate={test_metrics.get('win_rate', 0):.2%} "
+                    f"sharpe={test_metrics.get('sharpe', 0):.2f}"
+                )
+                signals = _signals_from_test(test_signals_df)
+
+            logger.info(
+                f"Strategy {current_strategy['id'][:8]} ready — "
+                f"win_rate={test_metrics.get('win_rate', 0):.2%} "
+                f"sharpe={test_metrics.get('sharpe', 0):.2f}"
+            )
 
             logger.info(
                 f"Strategy {current_strategy['id'][:8]} PASSED out-of-sample test — "
                 f"win_rate={test_metrics.get('win_rate', 0):.2%} "
                 f"sharpe={test_metrics.get('sharpe', 0):.2f}"
             )
-
-            # E. Signal conversion from TEST data (most recent signals)
-            signals: Dict[str, int] = {}
-            if 'signal' in test_signals_df.columns:
-                for symbol, group in test_signals_df.groupby(level='symbol'):
-                    last_signal = int(group['signal'].iloc[-1])
-                    signals[symbol] = last_signal
 
             # F. Exit checks (stop-loss / take-profit / max-hold) on open positions
             open_trades = memory.get_open_trades()
