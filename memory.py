@@ -103,6 +103,28 @@ class MemoryManager:
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (source_reflection_id) REFERENCES reflections (id)
                 );
+
+                CREATE TABLE IF NOT EXISTS processed_bars (
+                    symbol TEXT NOT NULL,
+                    timeframe TEXT NOT NULL,
+                    bar_timestamp TEXT NOT NULL,
+                    processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (symbol, timeframe, bar_timestamp)
+                );
+
+                CREATE TABLE IF NOT EXISTS bars (
+                    symbol TEXT NOT NULL,
+                    timeframe TEXT NOT NULL,
+                    bar_timestamp TEXT NOT NULL,
+                    open REAL NOT NULL,
+                    high REAL NOT NULL,
+                    low REAL NOT NULL,
+                    close REAL NOT NULL,
+                    volume REAL,
+                    source TEXT NOT NULL DEFAULT 'alpaca',
+                    recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (symbol, timeframe, bar_timestamp)
+                );
             """)
 
             # --- Migrations for databases created before direction_right existed ---
@@ -353,3 +375,48 @@ class MemoryManager:
                 SET failure_count = 0, reset_at = CURRENT_TIMESTAMP
                 WHERE strategy_id = ?
             """, (strategy_id,))
+
+    # --- Processed-bar tracking (hourly bar dedup) ---
+
+    def is_bar_processed(self, symbol: str, timeframe: str, bar_timestamp: str) -> bool:
+        """Return True if this (symbol, timeframe, bar_timestamp) was already processed."""
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM processed_bars WHERE symbol = ? AND timeframe = ? AND bar_timestamp = ?",
+                (symbol, timeframe, bar_timestamp),
+            ).fetchone()
+            return row is not None
+
+    def mark_bar_processed(self, symbol: str, timeframe: str, bar_timestamp: str) -> None:
+        """Record that this (symbol, timeframe, bar_timestamp) has been processed."""
+        with self._get_connection() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO processed_bars (symbol, timeframe, bar_timestamp) "
+                "VALUES (?, ?, ?)",
+                (symbol, timeframe, bar_timestamp),
+            )
+
+    # --- Bar persistence (real trading graphs) ---
+
+    def save_bar(self, symbol: str, timeframe: str, bar_timestamp: str,
+                 open: float, high: float, low: float, close: float,
+                 volume: Optional[float] = None, source: str = "alpaca") -> None:
+        """Persist an OHLC bar so the dashboard can render real price charts."""
+        with self._get_connection() as conn:
+            conn.execute(
+                """INSERT OR REPLACE INTO bars
+                   (symbol, timeframe, bar_timestamp, open, high, low, close, volume, source)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (symbol, timeframe, bar_timestamp, open, high, low, close, volume, source),
+            )
+
+    def get_bars(self, symbol: str, timeframe: str, limit: int = 500) -> List[Dict[str, Any]]:
+        """Return recent OHLC bars for a symbol/timeframe, newest first."""
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                """SELECT bar_timestamp, open, high, low, close, volume
+                   FROM bars WHERE symbol = ? AND timeframe = ?
+                   ORDER BY bar_timestamp DESC LIMIT ?""",
+                (symbol, timeframe, limit),
+            ).fetchall()
+        return [dict(r) for r in rows]

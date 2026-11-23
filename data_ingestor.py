@@ -205,13 +205,18 @@ class DataIngestor:
             return regime_id
         return None
 
-    def get_train_test_split(self, train_days: int = 60, test_days: int = 14) -> tuple:
+    def get_train_test_split(self, train_days: int = 60, test_days: int = 14,
+                             timeframe: TimeFrame = TimeFrame.Hour) -> tuple:
         """
         Fetch real market data and split into train (older) and test (recent held-out).
 
         Train data is used to backtest candidate strategies; test data is held out
         and used only for out-of-sample validation. This prevents the cheating where
         a strategy is tested on the same data it was generated for.
+
+        Only returns bars that have not yet been processed (per symbol, timeframe,
+        bar_timestamp tracked in processed_bars), so a restart neither skips a bar
+        nor trades the same bar twice.
 
         Returns (train_df, test_df) — both multi-index (timestamp, symbol) DataFrames.
         """
@@ -220,7 +225,7 @@ class DataIngestor:
         start = end - timedelta(days=train_days + test_days + 5)
 
         symbols = self.settings.universe.symbols
-        df = self.fetch_bars(symbols, TimeFrame.Day, start, end)
+        df = self.fetch_bars(symbols, timeframe, start, end)
 
         if df.empty:
             return pd.DataFrame(), pd.DataFrame()
@@ -228,7 +233,22 @@ class DataIngestor:
         # Sort by timestamp to ensure chronological split
         df = df.sort_index()
 
-        # Split point: test = last test_days, train = everything before
+        # Filter out already-processed bars (hourly dedup across restarts).
+        # A bar is skipped only if every symbol's bar at that timestamp was processed;
+        # otherwise the bar is included and each symbol is marked processed as it's used.
+        unprocessed_mask = pd.Series(False, index=df.index)
+        for symbol, group in df.groupby(level='symbol'):
+            for ts in group.index.get_level_values('timestamp'):
+                if not self.memory.is_bar_processed(symbol, timeframe.name, str(ts)):
+                    unprocessed_mask = unprocessed_mask | (
+                        df.index.get_level_values('timestamp') == ts
+                    )
+
+        df = df.loc[unprocessed_mask].copy()
+        if df.empty:
+            return pd.DataFrame(), pd.DataFrame()
+
+        # Split point: test = last test_days of *new* bars, train = everything before
         latest_ts = df.index.get_level_values('timestamp').max()
         split_ts = latest_ts - timedelta(days=test_days)
 
@@ -245,3 +265,11 @@ class DataIngestor:
             test_df = _add_indicators(test_df)
 
         return train_df, test_df
+
+    def mark_train_bars_processed(self, train_df: pd.DataFrame, timeframe: TimeFrame) -> None:
+        """Mark all bars in train_df as processed after they've been consumed this cycle."""
+        if train_df.empty:
+            return
+        for symbol, group in train_df.groupby(level='symbol'):
+            for ts in group.index.get_level_values('timestamp'):
+                self.memory.mark_bar_processed(symbol, timeframe.name, str(ts))

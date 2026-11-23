@@ -28,6 +28,8 @@ from fastapi.requests import Request
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from config import Settings
+from memory import MemoryManager
+from skills.ml4t.risk_management.drift_detection import DriftDetector
 
 
 # ---------------------------------------------------------------------------
@@ -41,6 +43,11 @@ settings = Settings.load(env_path=os.path.join(BASE_DIR, ".env"))
 MEMORY_DB = settings.runtime.db_path or os.path.join(DATA_DIR, "memory.sqlite")
 # Read-only URI so the dashboard can never mutate the daemon's database.
 MEMORY_DB_RO = "file:" + MEMORY_DB + "?mode=ro"
+
+# Shared MemoryManager so drift evaluation reads the same trade outcomes
+# the daemon writes (broker-confirmed fills only).
+_memory = MemoryManager(settings)
+drift_detector = DriftDetector(memory=_memory, db_path=DRIFT_DB)
 
 app = FastAPI(title="Self-Evolving Trading AI — Dashboard")
 
@@ -250,6 +257,27 @@ def api_rules():
     return JSONResponse([{"rule": r["rule_text"], "created_at": r["created_at"]} for r in rows])
 
 
+@app.get("/api/rules-drift")
+def api_rules_drift():
+    """Rule drift audit — rules whose recent outcomes underperform baseline."""
+    try:
+        drifting = drift_detector.evaluate_all_rules(window_days=14, drift_threshold=0.20)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+    return JSONResponse([{
+        "rule_id": d.rule_id,
+        "rule_text": d.rule_text,
+        "recent_trades": d.recent_trades,
+        "recent_win_rate": round(d.recent_win_rate, 4),
+        "recent_avg_pnl": round(d.recent_avg_pnl, 4),
+        "baseline_win_rate": round(d.baseline_win_rate, 4),
+        "baseline_avg_pnl": round(d.baseline_avg_pnl, 4),
+        "drift_score": round(d.drift_score, 4),
+        "is_drifting": d.is_drifting,
+        "recommendation": d.recommendation,
+    } for d in drifting])
+
+
 @app.get("/api/equity-curve")
 def api_equity_curve():
     """Equity curve data: cumulative PnL over time for the chart."""
@@ -269,31 +297,33 @@ def api_equity_curve():
 def api_price_chart(symbol: str):
     """OHLC + signal data for a symbol's price chart.
 
-    Reads recent bars from the train/test split data stored in backtests? No —
-    the backtests table stores metrics_json, not bars. Instead we synthesize
-    chart points from trade entry/exit prices so the user can at least see
-    where trades happened. The daemon's test_df holds the real bars but isn't
-    persisted; this endpoint returns trade-based markers for now.
+    Reads real OHLC bars persisted by the daemon (memory.sqlite `bars` table),
+    merged with filled trades so signal markers (entry/exit) can be overlaid.
     """
+    timeframe = "Hour"
+    bars = _query_memory(
+        """SELECT bar_timestamp AS t, open AS o, high AS h, low AS l, close AS c, volume AS v
+           FROM bars WHERE symbol = ? AND timeframe = ?
+           ORDER BY bar_timestamp ASC LIMIT 500""",
+        (symbol, timeframe),
+    )
+    # Build signal markers from filled trades for this symbol.
     trades = _query_memory(
         "SELECT entry_price, exit_price, side, direction_right, created_at FROM trades "
         "WHERE symbol = ? AND status = 'filled' ORDER BY created_at ASC",
         (symbol,),
     )
-    candles = []
+    signals = []
     for t in trades:
         entry = t["entry_price"] or 0
         exit_px = t["exit_price"] or 0
-        candles.append({
+        signals.append({
             "t": t["created_at"],
-            "o": round(entry, 4),
-            "h": round(max(entry, exit_px), 4),
-            "l": round(min(entry, exit_px), 4),
-            "c": round(exit_px, 4),
+            "price": round(exit_px, 4) if exit_px else round(entry, 4),
             "side": t["side"],
             "direction_right": t.get("direction_right"),
         })
-    return JSONResponse(candles)
+    return JSONResponse({"bars": bars, "signals": signals, "symbol": symbol, "timeframe": timeframe})
 
 
 @app.get("/api/mode")

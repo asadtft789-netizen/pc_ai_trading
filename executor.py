@@ -117,15 +117,16 @@ class StrategyExecutor:
             "order_id": str(getattr(order, 'id', '')),
         }
 
-    def _close_position(self, symbol: str) -> bool:
-        """Liquidates a position for a specific symbol. Returns True on success."""
+    def _close_position(self, symbol: str) -> Optional[Any]:
+        """Liquidates a position for a specific symbol. Returns the broker order
+        on success (so the caller can confirm the fill), or None on failure."""
         logger.info(f"Closing position for {symbol}")
         try:
-            self.trading_client.close_position(symbol)
-            return True
+            order = self.trading_client.close_position(symbol)
+            return order
         except Exception as e:
             logger.error(f"Failed to close position for {symbol}: {e}")
-            return False
+            return None
 
     def _open_position(self, symbol: str, side: OrderSide) -> Optional[Any]:
         """Opens a new position based on risk engine constraints."""
@@ -251,11 +252,11 @@ class StrategyExecutor:
 
             pos = positions.get(symbol)
             if pos is None:
-                # Alpaca reports no position: mark unknown (await fill confirmation),
-                # never fabricate a realized fill from an estimated mark.
-                price = latest_prices.get(symbol) or entry_price or 0.0
-                pnl = (price - entry_price) * qty if side == 'buy' else (entry_price - price) * qty
-                updated.append({**trade, 'price': price, 'pnl': pnl, 'status': 'unknown'})
+                # Alpaca reports no position: mark unknown (await broker fill
+                # confirmation), never fabricate a realized fill from an
+                # estimated mark. Price and PnL are left unset until a real
+                # fill confirms the exit.
+                updated.append({**trade, 'price': None, 'pnl': None, 'status': 'unknown'})
             else:
                 price = float(getattr(pos, 'current_price', 0) or 0)
                 if side == 'buy':

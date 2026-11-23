@@ -259,32 +259,57 @@ async function loadEquityChart() {
 
 async function loadPriceChart() {
   const data = await fetchJson("/api/price-chart/BTC/USD");
-  if (!data || data.length === 0) return;
+  if (!data || !data.bars || data.bars.length === 0) return;
 
-  const xs = data.map((d) => d.t);
-  const opens = data.map((d) => d.o);
-  const highs = data.map((d) => d.h);
-  const lows = data.map((d) => d.l);
-  const closes = data.map((d) => d.c);
+  const bars = data.bars;
+  const signals = data.signals || [];
 
-  Plotly.newPlot("priceChart", [
-    {
-      type: "candlestick",
-      x: xs,
-      open: opens,
-      high: highs,
-      low: lows,
-      close: closes,
-      increasing: { line: { color: "#22c55e" } },
-      decreasing: { line: { color: "#ef4444" } },
-    },
-  ], {
+  const xs = bars.map((d) => d.t);
+  const opens = bars.map((d) => d.o);
+  const highs = bars.map((d) => d.h);
+  const lows = bars.map((d) => d.l);
+  const closes = bars.map((d) => d.c);
+
+  // Signal markers from filled trades for this symbol.
+  const buyX = [], buyY = [], sellX = [], sellY = [];
+  signals.forEach((s) => {
+    const x = s.t;
+    const y = s.price;
+    if ((s.side || "").toLowerCase() === "buy") { buyX.push(x); buyY.push(y); }
+    else { sellX.push(x); sellY.push(y); }
+  });
+
+  const traces = [{
+    type: "candlestick",
+    x: xs, open: opens, high: highs, low: lows, close: closes,
+    increasing: { line: { color: "#22c55e" } },
+    decreasing: { line: { color: "#ef4444" } },
+    name: "OHLC",
+  }];
+
+  if (buyX.length) {
+    traces.push({
+      type: "scatter", x: buyX, y: buyY, mode: "markers",
+      marker: { symbol: "triangle-up", size: 12, color: "#22c55e", line: { width: 1, color: "#000" } },
+      name: "Buy signal",
+    });
+  }
+  if (sellX.length) {
+    traces.push({
+      type: "scatter", x: sellX, y: sellY, mode: "markers",
+      marker: { symbol: "triangle-down", size: 12, color: "#ef4444", line: { width: 1, color: "#000" } },
+      name: "Sell signal",
+    });
+  }
+
+  Plotly.newPlot("priceChart", traces, {
     template: "plotly_dark",
     paper_bgcolor: "rgba(0,0,0,0)",
     plot_bgcolor: "rgba(0,0,0,0)",
     margin: { l: 40, r: 20, t: 20, b: 30 },
     xaxis: { showgrid: false, zeroline: false, rangeslider: { visible: false } },
     yaxis: { showgrid: true, gridcolor: "#1e293b", zeroline: false, tickprefix: "$" },
+    legend: { orientation: "h", y: -0.2 },
     displayModeBar: false,
   });
 }

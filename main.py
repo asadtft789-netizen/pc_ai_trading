@@ -4,6 +4,7 @@ import json
 import pandas as pd
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List
+from alpaca.data.timeframe import TimeFrame
 from config import Settings
 from memory import MemoryManager
 from llm_mutator import StrategyMutator
@@ -350,6 +351,31 @@ def main():
                 logger.warning("No market data received; skipping iteration.")
                 time.sleep(60)
                 continue
+
+            # Persist all fetched bars (train + test) so the dashboard can render
+            # real OHLC price charts from actual market data.
+            timeframe_str = TimeFrame.Hour.name
+            all_bars = pd.concat([train_df, test_df])
+            for symbol, group in all_bars.groupby(level="symbol"):
+                for ts in group.index.get_level_values("timestamp"):
+                    row = group.xs(ts, level="timestamp")
+                    if isinstance(row, pd.DataFrame):
+                        row = row.iloc[0]
+                    memory.save_bar(
+                        symbol=symbol,
+                        timeframe=timeframe_str,
+                        bar_timestamp=str(ts),
+                    open=float(row["open"]),
+                    high=float(row["high"]),
+                    low=float(row["low"]),
+                    close=float(row["close"]),
+                    volume=float(row.get("volume", 0) or 0),
+                    source="alpaca",
+                )
+
+            # Mark newly-fetched train bars as processed so a restart neither
+            # skips a bar nor re-trades the same bar (hourly dedup).
+            data_ingestor.mark_train_bars_processed(train_df, TimeFrame.Hour)
 
             # Current prices for live trading (most recent close per symbol)
             latest_prices: Dict[str, float] = {}
@@ -706,8 +732,12 @@ def main():
                 f"sharpe={test_metrics.get('sharpe', 0):.2f}"
             )
 
-            # F. Exit checks (stop-loss / take-profit / max-hold) on open positions
+            # F. Exit checks (stop-loss / take-profit / max-hold) on open positions.
+            # Close positions on the broker first; PnL is booked only when the
+            # broker confirms the fill (reconciliation below). Never book an
+            # estimated mark as realized PnL.
             open_trades = memory.get_open_trades()
+            trade_by_symbol: Dict[str, Dict[str, Any]] = {t['symbol']: t for t in open_trades}
             trade_opened_at: Dict[str, float] = {}
             for t in open_trades:
                 try:
@@ -731,24 +761,43 @@ def main():
 
             for ev in exit_events:
                 sym = ev['symbol']
-                # Close by order_id (trade ID) so multiple lots of the same symbol
-                # are tracked independently instead of clobbering each other.
+                trade = trade_by_symbol.get(sym, {})
+                entry_price = trade.get('entry_price') or 0.0
                 order_id = ev.get('order_id')
+
+                # Close on the broker first; book PnL only on confirmed fill.
+                close_order = executor._close_position(sym)
+                if close_order is None:
+                    logger.warning(
+                        f"EXIT {ev['reason']}: {sym} close not confirmed by broker — "
+                        f"trade left open, awaiting fill confirmation."
+                    )
+                    continue
+
+                # Broker-confirmed fill: source of truth is the broker's fill,
+                # not the estimated mark used to trigger the exit.
+                fill_price = float(getattr(close_order, 'filled_avg_price', 0) or ev['price'])
+                fill_qty = float(getattr(close_order, 'filled_qty', trade.get('qty', 0)) or trade.get('qty', 0))
+                side = trade.get('side', '').lower()
+                confirmed_pnl = (fill_price - entry_price) * fill_qty if side == 'buy' \
+                    else (entry_price - fill_price) * fill_qty
+
                 if order_id:
-                    memory.close_trade_by_order_id(order_id, ev['price'], ev['pnl'])
-                executor._close_position(sym)
+                    memory.close_trade_by_order_id(order_id, fill_price, confirmed_pnl)
                 logger.info(
-                    f"EXIT {ev['reason']}: {sym} {ev['side']} qty={ev['qty']} "
-                    f"price={ev['price']:.2f} pnl={ev['pnl']:.2f} strategy={current_strategy['id'][:8]}"
+                    f"EXIT {ev['reason']}: {sym} {side} qty={fill_qty} "
+                    f"price={fill_price:.2f} pnl={confirmed_pnl:.2f} "
+                    f"strategy={current_strategy['id'][:8]}"
                 )
-                # Record outcome against each rule for drift detection (paper-trading based).
+                # Record outcome against each rule for drift detection — only
+                # for broker-confirmed fills, never estimated marks.
                 try:
                     for rule in memory.get_all_rules():
                         drift_detector.record_outcome(
                             rule_id=rule['id'],
                             rule_text=rule['rule_text'],
-                            trade_id=str(order_id or f"{sym}:{ev['price']}"),
-                            pnl=float(ev['pnl']),
+                            trade_id=str(order_id or f"{sym}:{fill_price}"),
+                            pnl=float(confirmed_pnl),
                             trade_date=datetime.now(timezone.utc),
                         )
                 except Exception as e:
@@ -759,15 +808,20 @@ def main():
             if not snapshot_ok:
                 logger.warning("Broker snapshot unavailable during reconciliation — "
                                "leaving open trades as 'unknown' (never fabricating fills).")
+            # Only a broker-confirmed close counts as a realized fill. Trades left
+            # 'unknown' (position absent from broker snapshot) are never closed or
+            # booked as PnL here — they await an actual fill confirmation.
             for t in reconciled:
-                if t['status'] == 'filled':
-                    memory.close_trade_by_order_id(t['id'], t['price'], t['pnl'])
-                    logger.info(
-                        f"RECONCILED CLOSE: {t['symbol']} exit={t['price']:.2f} pnl={t['pnl']:.2f}"
+                if t['status'] == 'unknown':
+                    logger.debug(
+                        f"RECONCILED UNKNOWN: {t['symbol']} awaits fill confirmation "
+                        f"(snapshot_ok={snapshot_ok})"
                     )
 
-            # H. New position opens (paper trading, only if daily loss limit not hit)
-            if daily_pnl > -settings.risk.max_daily_loss_usd:
+            # H. New position opens (paper trading, only if daily loss limit not hit).
+            # Only open new positions when the broker snapshot is confirmed — an
+            # unknown snapshot means we cannot trust the current position state.
+            if daily_pnl > -settings.risk.max_daily_loss_usd and snapshot_ok:
                 open_events = executor.sync_positions(signals)
                 for event in open_events:
                     if event["type"] == "open":
@@ -832,6 +886,23 @@ def main():
                 logger.info(f"Saved rule #{reflection_id}: {lesson}")
             else:
                 logger.warning("Could not generate a lesson this iteration.")
+
+            # J1. Rules review — evaluate every rule for drift (audit + upgrade).
+            # Only broker-confirmed fills feed rule outcomes (Section F above), so
+            # drift signals are grounded in real results, never estimated marks.
+            try:
+                drifting = drift_detector.evaluate_all_rules(window_days=14, drift_threshold=0.20)
+                if drifting:
+                    for d in drifting[:3]:
+                        logger.warning(
+                            f"RULE DRIFT id={d.rule_id} score={d.drift_score:.2f}: "
+                            f"recent win_rate={d.recent_win_rate:.2%} vs baseline={d.baseline_win_rate:.2%} "
+                            f"({d.recommendation})"
+                        )
+                else:
+                    logger.debug("No rules drifting — all rules within norms.")
+            except Exception as e:
+                logger.debug(f"Rules drift evaluation skipped: {e}")
 
             # J. Reflection / metrics logging
             metrics = memory.get_trade_metrics()
