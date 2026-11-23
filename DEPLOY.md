@@ -119,20 +119,25 @@ cat /opt/self_evolving_trader/daemon.log
 - The SQLite database (`data/memory.sqlite`) persists strategies, trades, and learned rules across restarts.
 - Your laptop can be closed once the remote service is started — the daemon runs independently.
 
-## Pterodactyl Panel setup
+## Pterodactyl Panel setup (auto-pull from GitHub)
 
 If you're using a Pterodactyl panel (not a full VPS), systemd does not exist inside the container — the panel itself supervises and restarts the process.
 
 1. Create a new **Python** server in Pterodactyl.
-2. **Startup command:** `bash /home/container/deploy/pterodactyl/start.sh`
-3. **Before first boot**, upload your `.env` and edit these paths for Linux:
+2. **Startup command:** `bash /home/container/deploy/pterodactyl/setup.sh`
+3. **Upload your `.env`** via the panel's File Manager or SFTP. The script pulls the code from GitHub but **never** uploads `.env` — you must add it manually with your Alpaca paper-trading API keys:
    ```
-   DATA_DIR=/home/container/data
-   DB_PATH=/home/container/data/memory.sqlite
+   ALPACA_API_KEY=...
+   ALPACA_API_SECRET=...
+   DATA_DIR=data
+   DB_PATH=data/memory.sqlite
    ```
-   (Your laptop's `.env` uses Windows paths like `C:/...`; those will crash inside the container.)
-4. **Upload project files** via the panel's File Manager (or SFTP/FTP): copy everything **except** `.git`, `__pycache__`, `data/`, and `daemon.log`.
-5. Start the server. First boot installs Python dependencies (~2 minutes). Check the console to confirm `main.py` launched.
+4. **Authentication for the private repo** — pick one:
+   - **GitHub personal access token:** add `GITHUB_TOKEN` as a Pterodactyl *environment variable* on the server. The script uses it to clone automatically.
+   - **SSH deploy key:** add your public key as a *Deploy Key* in the repo settings (Settings → Deploy keys → Add deploy key), then the script clones via SSH.
+5. Start the server. First boot clones the repo and installs Python dependencies (~2 minutes). Check the console to confirm `main.py` launched.
+
+The script updates the repo on every boot (`git reset --hard origin/main`), so pushing code to GitHub updates your running bot automatically.
 
 ## Security notes
 
