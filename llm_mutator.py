@@ -54,18 +54,30 @@ class StrategyMutator:
         )
 
     def _build_client(self, provider: str, base_url: str | None, api_key: str):
-        """Build a single LLM client descriptor. Returns (client_type, client)."""
+        """Build a single LLM client descriptor. Returns (client_type, client).
+
+        If a non-Google provider has no usable key, the descriptor is returned with
+        a None client so construction never crashes; _chat_complete skips clients
+        that are None and reports the chain as unavailable.
+        """
+        api_key = (api_key or "").strip()
         if provider == "anthropic":
+            if not api_key:
+                return "anthropic", None
             return "anthropic", anthropic.Anthropic(api_key=api_key)
         if provider == "openrouter" or (
             base_url and "openrouter.ai" in base_url
         ):
+            if not api_key:
+                return "openai", None
             return "openai", OpenAI(api_key=api_key, base_url=base_url or "https://openrouter.ai/api/v1")
         if base_url and "generativelanguage.googleapis.com" in base_url:
             # Google AI Studio: native generateContent endpoint (its OpenAI-compatible
             # chat endpoint returns 404 for every model).
             return "google", None
         # Default: OpenAI-compatible
+        if not api_key:
+            return "openai", None
         return "openai", OpenAI(api_key=api_key, base_url=base_url or "https://api.openai.com/v1")
 
     def _generate_prompt(self,
