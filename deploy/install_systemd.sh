@@ -1,6 +1,6 @@
 #!/bin/bash
-# Install the self-evolving trader as a systemd service so it runs 24/7
-# and auto-restarts on crash. Run this once on your VPS.
+# Install the self-evolving trader so it runs 24/7 and auto-restarts on crash.
+# Run this once on your VPS.
 #
 # Usage:
 #   bash deploy/install_systemd.sh
@@ -42,24 +42,44 @@ if [ ! -f .env ]; then
     exit 1
 fi
 
-# 5. Install systemd service
-echo "[4/5] Installing systemd service..."
-cp "$SERVICE_FILE" "/etc/systemd/system/${SERVICE_NAME}.service"
-systemctl daemon-reload
-systemctl enable "${SERVICE_NAME}.service"
+# 5. Install service (systemd on a real VPS, background process in a container)
+if command -v systemctl >/dev/null 2>&1 && systemctl is-system-running >/dev/null 2>&1; then
+    echo "[4/5] Installing systemd service..."
+    cp "$SERVICE_FILE" "/etc/systemd/system/${SERVICE_NAME}.service"
+    systemctl daemon-reload
+    systemctl enable "${SERVICE_NAME}.service"
 
-# 6. Start the service
-echo "[5/5] Starting the daemon..."
-systemctl restart "${SERVICE_NAME}.service"
+    echo "[5/5] Starting the daemon..."
+    systemctl restart "${SERVICE_NAME}.service"
 
-echo ""
-echo "============================================================"
-echo "  Self-Evolving Trader is now running 24/7!"
-echo "============================================================"
-echo ""
-echo "  Check status:   systemctl status ${SERVICE_NAME}.service"
-echo "  Watch logs:     journalctl -u ${SERVICE_NAME}.service -f"
-echo "  Local log:      ${REPO_DIR}/daemon.log"
-echo "  Restart:        systemctl restart ${SERVICE_NAME}.service"
-echo "  Stop:           systemctl stop ${SERVICE_NAME}.service"
-echo ""
+    echo ""
+    echo "============================================================"
+    echo "  Self-Evolving Trader is now running 24/7!"
+    echo "============================================================"
+    echo ""
+    echo "  Check status:   systemctl status ${SERVICE_NAME}.service"
+    echo "  Watch logs:     journalctl -u ${SERVICE_NAME}.service -f"
+    echo "  Local log:      ${REPO_DIR}/daemon.log"
+    echo "  Restart:        systemctl restart ${SERVICE_NAME}.service"
+    echo "  Stop:           systemctl stop ${SERVICE_NAME}.service"
+    echo ""
+else
+    echo "[4/5] systemd not available (container) — starting as background process..."
+    # Kill any existing instance
+    pkill -f "python3 -u ${REPO_DIR}/main.py" 2>/dev/null || true
+    sleep 1
+
+    # Start in background with nohup so it survives shell exit
+    nohup python3 -u main.py >> daemon.log 2>&1 &
+    echo "  Started daemon with PID: $!"
+    echo ""
+    echo "============================================================"
+    echo "  Self-Evolving Trader is now running 24/7!"
+    echo "============================================================"
+    echo ""
+    echo "  Check status:   ps aux | grep main.py"
+    echo "  Watch logs:     tail -f ${REPO_DIR}/daemon.log"
+    echo "  Restart:        pkill -f main.py && nohup python3 -u main.py >> daemon.log 2>&1 &"
+    echo "  Stop:           pkill -f main.py"
+    echo ""
+fi
