@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Self-Evolving Trading AI — Dashboard</title>
+<link rel="stylesheet" href="/static/style.css">
+<script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+</head>
+<body>
+
+<div class="shell">
+  <!-- Sidebar -->
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-mark">AI</div>
+      <div class="brand-name">Self-Evolving Trader</div>
+    </div>
+    <nav class="nav">
+      <a href="#" class="nav-item active" data-page="overview">Overview</a>
+      <a href="#" class="nav-item" data-page="trades">Trades</a>
+      <a href="#" class="nav-item" data-page="lessons">Lessons</a>
+      <a href="#" class="nav-item" data-page="rules">Rules</a>
+    </nav>
+    <div class="divider"></div>
+    <div class="mode-card">
+      <div class="mode-label">Trading Mode</div>
+      <div class="mode-value" id="modeValue">—</div>
+      <div class="mode-badge" id="modeBadge">—</div>
+    </div>
+    <div class="footer-note">
+      Updated <span id="lastUpdated">—</span>
+    </div>
+  </aside>
+
+  <!-- Main content -->
+  <main class="main">
+    <header class="app-header">
+      <h1>Trading AI Dashboard</h1>
+      <p class="subtitle">Autonomous swing-trading agent — live metrics, charts, and lessons</p>
+    </header>
+
+    <!-- Overview page -->
+    <section id="page-overview" class="page active">
+      <!-- KPI row -->
+      <div class="kpi-grid">
+        <div class="kpi-card">
+          <div class="kpi-label">Total Trades</div>
+          <div class="kpi-value" id="kpiTotalTrades">0</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Win Rate</div>
+          <div class="kpi-value" id="kpiWinRate">0.0%</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Win Trades</div>
+          <div class="kpi-value" id="kpiWinTrades">0</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Loss Trades</div>
+          <div class="kpi-value" id="kpiLossTrades">0</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Total PnL</div>
+          <div class="kpi-value" id="kpiTotalPnL">$0.00</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Daily PnL</div>
+          <div class="kpi-value" id="kpiDailyPnL">$0.00</div>
+        </div>
+      </div>
+
+      <!-- Regime + Strategy row -->
+      <div class="two-col">
+        <div class="panel">
+          <div class="panel-title">Market Regime</div>
+          <div class="regime-chip" id="regimeChip">—</div>
+          <div class="regime-details" id="regimeDetails"></div>
+        </div>
+        <div class="panel">
+          <div class="panel-title">Active Strategy</div>
+          <div class="strategy-id" id="strategyId">—</div>
+          <div class="strategy-name" id="strategyName">—</div>
+          <div class="strategy-meta" id="strategyMeta">—</div>
+        </div>
+      </div>
+
+      <!-- Charts row -->
+      <div class="charts-row">
+        <div class="panel chart-panel">
+          <div class="panel-title">Equity Curve (Cumulative PnL)</div>
+          <div id="equityChart" style="width:100%;height:320px;"></div>
+        </div>
+        <div class="panel chart-panel">
+          <div class="panel-title">Price Chart — BTC/USD</div>
+          <div id="priceChart" style="width:100%;height:320px;"></div>
+        </div>
+      </div>
+
+      <!-- Observation accuracy -->
+      <div class="two-col">
+        <div class="panel">
+          <div class="panel-title">Observation Accuracy</div>
+          <div class="acc-row">
+            <div class="acc-item">
+              <div class="acc-label">Correct</div>
+              <div class="acc-value acc-correct" id="accCorrect">0</div>
+            </div>
+            <div class="acc-item">
+              <div class="acc-label">Wrong</div>
+              <div class="acc-value acc-wrong" id="accWrong">0</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Recent trades -->
+      <div class="panel full-width">
+        <div class="panel-header">
+          <div class="panel-title">Recent Trades</div>
+        </div>
+        <div class="table-wrap" id="tradesTableWrap">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Time</th><th>Symbol</th><th>Side</th><th>Entry</th><th>Exit</th><th>PnL</th><th>Obs.</th><th>Status</th>
+              </tr>
+            </thead>
+            <tbody id="tradesTableBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- Trades page -->
+    <section id="page-trades" class="page">
+      <div class="panel full-width">
+        <div class="panel-header"><div class="panel-title">All Trades</div></div>
+        <div class="table-wrap" id="allTradesTableWrap">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Time</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Entry</th><th>Exit</th><th>PnL</th><th>Obs.</th><th>Status</th>
+              </tr>
+            </thead>
+            <tbody id="allTradesTableBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- Lessons page -->
+    <section id="page-lessons" class="page">
+      <div class="panel full-width">
+        <div class="panel-header"><div class="panel-title">Lessons Learned (AI Reflections)</div></div>
+        <div class="lessons-list" id="lessonsList"></div>
+      </div>
+    </section>
+
+    <!-- Rules page -->
+    <section id="page-rules" class="page">
+      <div class="panel full-width">
+        <div class="panel-header"><div class="panel-title">Saved Rules</div></div>
+        <div class="rules-list" id="rulesList"></div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

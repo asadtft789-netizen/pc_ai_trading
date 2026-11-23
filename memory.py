@@ -105,6 +105,11 @@ class MemoryManager:
                 );
             """)
 
+            # --- Migrations for databases created before direction_right existed ---
+            cols = {row[1] for row in conn.execute("PRAGMA table_info(trades)").fetchall()}
+            if "direction_right" not in cols:
+                conn.execute("ALTER TABLE trades ADD COLUMN direction_right INTEGER")
+
     def save_strategy(self, strategy_id: str, name: str, code: str, parent_id: Optional[str] = None, generation: int = 0):
         with self._get_connection() as conn:
             conn.execute(
@@ -132,15 +137,15 @@ class MemoryManager:
                  start_date.isoformat(), end_date.isoformat())
             )
 
-    def log_trade(self, order_id: str, strategy_id: str, symbol: str, qty: float, side: str, status: str, regime_id: Optional[int] = None):
+    def log_trade(self, order_id: str, strategy_id: str, symbol: str, qty: float, side: str, status: str, regime_id: Optional[int] = None, direction_right: Optional[int] = None):
         with self._get_connection() as conn:
             conn.execute(
-                """INSERT INTO trades (id, strategy_id, symbol, qty, side, status, regime_id)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (order_id, strategy_id, symbol, qty, side, status, regime_id)
+                """INSERT INTO trades (id, strategy_id, symbol, qty, side, status, regime_id, direction_right)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (order_id, strategy_id, symbol, qty, side, status, regime_id, direction_right)
             )
 
-    def update_trade(self, order_id: str, exit_price: Optional[float] = None, pnl: Optional[float] = None, status: Optional[str] = None):
+    def update_trade(self, order_id: str, exit_price: Optional[float] = None, pnl: Optional[float] = None, status: Optional[str] = None, direction_right: Optional[int] = None):
         with self._get_connection() as conn:
             if status:
                 conn.execute("UPDATE trades SET status = ? WHERE id = ?", (status, order_id))
@@ -148,6 +153,8 @@ class MemoryManager:
                 conn.execute("UPDATE trades SET exit_price = ? WHERE id = ?", (exit_price, order_id))
             if pnl is not None:
                 conn.execute("UPDATE trades SET pnl = ? WHERE id = ?", (pnl, order_id))
+            if direction_right is not None:
+                conn.execute("UPDATE trades SET direction_right = ? WHERE id = ?", (direction_right, order_id))
 
     def save_reflection(self, target_type: str, target_id: str, content: str, action_items: Optional[str] = None):
         with self._get_connection() as conn:
@@ -210,13 +217,16 @@ class MemoryManager:
 
     def get_daily_pnl(self) -> float:
         """Sum of realized PnL for trades filled today."""
-        with self._get_connection() as conn:
-            row = conn.execute(
-                "SELECT COALESCE(SUM(pnl), 0) FROM trades "
-                "WHERE status = 'filled' AND pnl IS NOT NULL "
-                "AND date(created_at) = date('now')"
-            ).fetchone()
-        return float(row[0]) if row else 0.0
+        try:
+            with self._get_connection() as conn:
+                row = conn.execute(
+                    "SELECT COALESCE(SUM(pnl), 0) FROM trades "
+                    "WHERE status = 'filled' AND pnl IS NOT NULL "
+                    "AND date(created_at) = date('now')"
+                ).fetchone()
+            return float(row[0]) if row else 0.0
+        except Exception:
+            return 0.0
 
     def get_trades_for_strategy(self, strategy_id: str, limit: int = 50) -> List[Dict[str, Any]]:
         with self._get_connection() as conn:

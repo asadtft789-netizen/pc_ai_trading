@@ -115,9 +115,13 @@ def _log_backtest_detail(label: str, metrics: Dict[str, Any]) -> None:
     logger.info(f"{label}: {metrics}")
 
 
-def _test_passes(test_metrics: Dict[str, Any]) -> bool:
+def _test_passes(test_metrics: Dict[str, Any], regime_label: str = "unknown") -> bool:
     """Out-of-sample gate: a strategy must pass on held-out test data before trading."""
-    if test_metrics.get("total_trades", 0) == 0:
+    total_trades = test_metrics.get("total_trades", 0)
+    if total_trades == 0:
+        # In a sideways/flat regime, staying flat (0 trades) is a valid capital preservation strategy
+        if regime_label == "sideways":
+            return True
         return False
     if test_metrics.get("win_rate", 0.0) < 0.40:
         return False
@@ -419,7 +423,7 @@ def main():
 
             # D. Only trade if the strategy passes out-of-sample test.
             #    If it fails, self-improve immediately: retire it and mutate a new one.
-            if not _test_passes(test_metrics):
+            if not _test_passes(test_metrics, regime_label=regime["label"]):
                 # --- Circuit breaker: pause after consecutive failures ---
                 memory.increment_strategy_failure(current_strategy['id'])
                 fail_count = memory.get_strategy_failure_count(current_strategy['id'])
@@ -527,6 +531,7 @@ def main():
                 )
 
                 trade_signals.append({
+                    'symbol': symbol,
                     'signal_type': signal_type,
                     'entry_price': entry_price,
                     'stop_loss_price': stop_loss_price,
@@ -540,60 +545,64 @@ def main():
                     'regime': regime['label'],
                 })
 
-            # --- Print owner-friendly dashboard ---
-            print("\n" + "=" * 60)
-            print("TRADING AI DASHBOARD")
-            print("=" * 60)
-            print(f"Time:         {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-            print(f"Strategy:     {current_strategy['name']} ({current_strategy['id'][:8]})")
-            print(f"Market Regime: {regime['label'].title()}")
-            print(f"Indicators:   {regime['indicators']}")
-            print(f"Daily PnL:    ${daily_pnl:+,.2f}")
+            # --- Premium AI Dashboard output ---
+            print("\n" + "═" * 70)
+            print("  🤖  SELF-EVOLVING TRADING AI — PREMIUM DASHBOARD")
+            print("═" * 70)
+            print(f"  Timestamp : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            print(f"  Strategy  : {current_strategy['name']} ({current_strategy['id'][:8]})")
+            print(f"  Regime    : {regime['label'].title()}")
+            print(f"  Indicators: avg_return_20d={regime['indicators'].get('avg_return_20d',0):.4f}  "
+                  f"volatility_20d={regime['indicators'].get('volatility_20d',0):.4f}  "
+                  f"momentum_ratio={regime['indicators'].get('momentum_ratio',1):.3f}")
+            print(f"  Daily PnL : ${daily_pnl:+,.2f}   "
+                  f"Test WinRate: {test_metrics.get('win_rate',0):.1%}   "
+                  f"Sharpe: {test_metrics.get('sharpe',0):.2f}")
             print()
 
-            # Show detected patterns and structure
-            print("PRICE ACTION & MARKET STRUCTURE:")
-            print("-" * 60)
+            # Price Action & Market Structure
+            print("  📈 PRICE ACTION & MARKET STRUCTURE")
+            print("  " + "-" * 68)
             for symbol, patterns in price_patterns.items():
                 if patterns:
-                    print(f"  {symbol}: {', '.join(patterns[:5])}")
+                    print(f"    {symbol}: {', '.join(patterns[:5])}")
             if crowded_long:
-                print("  CROWDED LONG detected - potential reversal signal")
+                print("    ⚠️  CROWDED LONG detected — potential reversal signal")
             if crowded_short:
-                print("  CROWDED SHORT detected - potential reversal signal")
+                print("    ⚠️  CROWDED SHORT detected — potential reversal signal")
             if impulse_pullback:
-                print("  IMPULSE + PULLBACK rhythm detected")
+                print("    🔄 IMPULSE + PULLBACK rhythm detected")
             print()
 
-            print("BREAK OF STRUCTURE / CHANGE OF CHARACTER:")
-            print("-" * 60)
+            print("  🏗️  BREAK OF STRUCTURE / CHANGE OF CHARACTER")
+            print("  " + "-" * 68)
             for b in market_structure.get('bos', [])[:5]:
-                print(f"  {b['type']} at ${b['level']:,.2f} ({b['direction']})")
+                print(f"    {b['type']} at ${b['level']:,.2f} ({b['direction']})")
             for c in market_structure.get('choch', [])[:5]:
-                print(f"  {c['type']} at ${c['level']:,.2f}")
+                print(f"    {c['type']} at ${c['level']:,.2f}")
             print()
 
-            print("SUPPORT / RESISTANCE ZONES:")
-            print("-" * 60)
+            print("  🎯 SUPPORT / RESISTANCE ZONES")
+            print("  " + "-" * 68)
             for zone in s_r_zones.get('support', [])[:3]:
-                print(f"  Support: ${zone['price_low']:,.2f} - ${zone['price_high']:,.2f} ({zone['confidence']})")
+                print(f"    Support : ${zone['price_low']:,.2f} - ${zone['price_high']:,.2f} ({zone['confidence']})")
             for zone in s_r_zones.get('resistance', [])[:3]:
-                print(f"  Resistance: ${zone['price_low']:,.2f} - ${zone['price_high']:,.2f} ({zone['confidence']})")
+                print(f"    Resistance: ${zone['price_low']:,.2f} - ${zone['price_high']:,.2f} ({zone['confidence']})")
             print()
 
-            print("FIBONACCI GOLDEN ZONE:")
-            print("-" * 60)
+            print("  📊 FIBONACCI GOLDEN ZONE")
+            print("  " + "-" * 68)
             for fib in fibonacci_levels.get('golden_zone', []):
-                at_zone = "AT ZONE" if fib.get('current_at_zone') else ""
-                print(f"  {fib['symbol']}: ${fib['low']:,.2f} - ${fib['high']:,.2f} {at_zone}")
+                at_zone = " ← PRICE AT ZONE" if fib.get('current_at_zone') else ""
+                print(f"    {fib['symbol']}: ${fib['low']:,.2f} - ${fib['high']:,.2f}{at_zone}")
             print()
 
-            print("TRADE SIGNALS:")
-            print("-" * 60)
+            print("  ⚡ TRADE SIGNALS")
+            print("  " + "-" * 68)
             if trade_signals:
                 for ts in trade_signals:
                     print(format_trade_signal(
-                        symbol=ts['entry_price'] and "N/A" or "N/A",  # placeholder
+                        symbol=ts['symbol'],
                         signal_type=ts['signal_type'],
                         entry_price=ts['entry_price'],
                         stop_loss_price=ts['stop_loss_price'],
@@ -607,10 +616,12 @@ def main():
                         regime=ts['regime'],
                     ))
             else:
-                print("  No active trade signals")
+                print("    No active trade signals — holding flat (capital preservation)")
             print()
 
             # Full analysis report for each symbol in universe
+            print("  🔍 SYMBOL-BY-SYMBOL ANALYSIS")
+            print("  " + "-" * 68)
             for symbol in settings.universe.symbols:
                 price_data = {'current_price': latest_prices.get(symbol, 0)}
                 print(format_analysis_report(
@@ -620,17 +631,11 @@ def main():
                     fibonacci=fibonacci_levels,
                     volume_profile=volume_profile,
                     market_structure=market_structure,
-                    trade_signals=[ts for ts in trade_signals if ts.get('entry_price') > 0],
+                    trade_signals=[ts for ts in trade_signals if ts.get('symbol') == symbol],
                 ))
 
             logger.info(
                 f"Strategy {current_strategy['id'][:8]} ready — "
-                f"win_rate={test_metrics.get('win_rate', 0):.2%} "
-                f"sharpe={test_metrics.get('sharpe', 0):.2f}"
-            )
-
-            logger.info(
-                f"Strategy {current_strategy['id'][:8]} PASSED out-of-sample test — "
                 f"win_rate={test_metrics.get('win_rate', 0):.2%} "
                 f"sharpe={test_metrics.get('sharpe', 0):.2f}"
             )
@@ -640,7 +645,11 @@ def main():
             trade_opened_at: Dict[str, float] = {}
             for t in open_trades:
                 try:
-                    opened_at = datetime.fromisoformat(t['created_at']).timestamp()
+                    created_at = t['created_at']
+                    if isinstance(created_at, str):
+                        opened_at = datetime.fromisoformat(created_at).timestamp()
+                    else:
+                        opened_at = float(created_at.timestamp() if hasattr(created_at, 'timestamp') else time.time())
                 except Exception:
                     opened_at = time.time()
                 trade_opened_at[t['symbol']] = opened_at

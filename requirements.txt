@@ -12,3 +12,8 @@ openai>=1.0.0
 
 # python-dotenv loads .env files
 python-dotenv>=1.0.0
+
+# Web dashboard (FastAPI + uvicorn)
+fastapi>=0.100.0
+uvicorn>=0.23.0
+python-multipart>=0.0.6
