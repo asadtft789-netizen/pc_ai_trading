@@ -1,0 +1,25 @@
+[Unit]
+Description=Self-Evolving Trading AI Daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/self_evolving_trader
+ExecStartPre=/usr/bin/python3 -m pip install -r requirements.txt
+ExecStart=/usr/bin/python3 /opt/self_evolving_trader/main.py
+Restart=always
+RestartSec=60
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/opt/self_evolving_trader/.env
+
+# Run as a dedicated non-root user for safety
+User=trader
+Group=trader
+
+# Logs go to journald; view with: journalctl -u self_evolving_trader -f
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -19,6 +19,48 @@ from skills.ml4t.advanced_ai.agent_state_memory import AgentState, EvidenceStore
 from skills.ml4t.risk_management.drift_detection import DriftDetector
 from skills.ml4t.risk_management.position_sizing import PositionSizer
 
+# Price action and market structure skills (from YouTube course gap analysis).
+from skills.tradermonty.skills.price_action_swing_trading.price_action import (
+    PriceActionDetector,
+    detect_crowded_long,
+    detect_crowded_short,
+    detect_impulse_pullback,
+    detect_support_resistance_breakout,
+)
+from skills.tradermonty.skills.price_action_swing_trading.market_structure import MarketStructureDetector
+from skills.tradermonty.skills.price_action_swing_trading.support_resistance import (
+    SupportResistanceDetector,
+    FibonacciRetracement,
+)
+from skills.tradermonty.skills.price_action_swing_trading.volume_analysis import VolumeAnalyzer
+from skills.tradermonty.skills.price_action_swing_trading.dashboard import (
+    format_trade_signal,
+    format_portfolio_summary,
+    format_analysis_report,
+)
+from skills.tradermonty.skills.price_action_swing_trading.risk_sizing import (
+    RiskSizer,
+    size_position_for_trade,
+)
+
+logger = logging.getLogger(__name__)
+
+
+def _setup_logging(log_level: str = "INFO") -> None:
+    """Configure logging for both local and unattended/remote operation.
+
+    Writes to stdout (captured by systemd/journald when run as a service)
+    and to daemon.log for local inspection.
+    """
+    logging.basicConfig(
+        level=getattr(logging, str(log_level).upper(), logging.INFO),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        handlers=[
+            logging.StreamHandler(),  # systemd / journald captures stdout
+            logging.FileHandler("daemon.log"),
+        ],
+    )
+
 
 def _load_strategy_instance(strategy_row: Dict[str, Any]) -> Optional[BaseStrategy]:
     """Dynamically loads an LLM-generated strategy class from its stored code."""
@@ -221,6 +263,7 @@ def _try_rule_fix(mutator: StrategyMutator,
 
 def main():
     # 1. Initialize components
+    _setup_logging()
     settings = Settings.load(env_path=".env")
     memory = MemoryManager(settings)
     risk_engine = RiskEngine(settings)
@@ -264,6 +307,28 @@ def main():
             regime = data_ingestor.detect_regime(test_df)
             regime_id = memory.save_regime(regime["label"], regime["indicators"])
             logger.info(f"Regime: {regime['label']} indicators={regime['indicators']}")
+
+            # --- Price action and market structure analysis ---
+            price_action_detector = PriceActionDetector()
+            market_structure_detector = MarketStructureDetector()
+            support_resistance_detector = SupportResistanceDetector()
+            fibonacci_retracement = FibonacciRetracement()
+            volume_analyzer = VolumeAnalyzer()
+
+            price_patterns = price_action_detector.detect_candlestick_patterns(test_df)
+            market_structure = market_structure_detector.detect_bos_choch(test_df)
+            swing_points = market_structure_detector.detect_swing_points(test_df)
+            s_r_zones = support_resistance_detector.detect_zones(test_df)
+            fibonacci_levels = fibonacci_retracement.detect_retracement_levels(test_df)
+            volume_profile = volume_analyzer.analyze_volume_profile(test_df)
+
+            # --- Crowd/level detection (from course: crowded long/short, impulse+pullback) ---
+            crowded_long = detect_crowded_long(test_df)
+            crowded_short = detect_crowded_short(test_df)
+            impulse_pullback = detect_impulse_pullback(test_df)
+
+            # --- Proper risk-based position sizing ---
+            risk_sizer = RiskSizer(default_risk_pct=0.01)  # 1% risk per trade
 
             # Daily loss kill switch
             daily_pnl = memory.get_daily_pnl()
@@ -443,6 +508,121 @@ def main():
                 memory.reset_strategy_failure(current_strategy['id'])
                 signals = _signals_from_test(test_signals_df)
 
+            # --- Build trading signals with full trade details ---
+            trade_signals = []
+            for symbol, signal in signals.items():
+                if signal == 0:
+                    continue
+                signal_type = 'buy' if signal == 1 else 'sell'
+                entry_price = latest_prices.get(symbol) or _latest_close_for_symbol(test_df, symbol) or 0.0
+                stop_loss_price = entry_price * 0.95 if signal == 1 else entry_price * 1.05
+                target_price = entry_price * 1.10 if signal == 1 else entry_price * 0.90
+
+                position_size = size_position_for_trade(
+                    account_equity_usd=float(settings.risk.max_capital_usd),
+                    entry_price=entry_price,
+                    stop_loss_price=stop_loss_price,
+                    risk_pct=0.01,
+                    side=signal_type
+                )
+
+                trade_signals.append({
+                    'signal_type': signal_type,
+                    'entry_price': entry_price,
+                    'stop_loss_price': stop_loss_price,
+                    'target_price': target_price,
+                    'qty': position_size.qty,
+                    'risk_amount_usd': position_size.risk_amount_usd,
+                    'risk_pct': position_size.risk_pct,
+                    'reward_to_risk_ratio': position_size.reward_to_risk_ratio,
+                    'confidence': 'medium',
+                    'pattern': '',
+                    'regime': regime['label'],
+                })
+
+            # --- Print owner-friendly dashboard ---
+            print("\n" + "=" * 60)
+            print("TRADING AI DASHBOARD")
+            print("=" * 60)
+            print(f"Time:         {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            print(f"Strategy:     {current_strategy['name']} ({current_strategy['id'][:8]})")
+            print(f"Market Regime: {regime['label'].title()}")
+            print(f"Indicators:   {regime['indicators']}")
+            print(f"Daily PnL:    ${daily_pnl:+,.2f}")
+            print()
+
+            # Show detected patterns and structure
+            print("PRICE ACTION & MARKET STRUCTURE:")
+            print("-" * 60)
+            for symbol, patterns in price_patterns.items():
+                if patterns:
+                    print(f"  {symbol}: {', '.join(patterns[:5])}")
+            if crowded_long:
+                print("  CROWDED LONG detected - potential reversal signal")
+            if crowded_short:
+                print("  CROWDED SHORT detected - potential reversal signal")
+            if impulse_pullback:
+                print("  IMPULSE + PULLBACK rhythm detected")
+            print()
+
+            print("BREAK OF STRUCTURE / CHANGE OF CHARACTER:")
+            print("-" * 60)
+            for b in market_structure.get('bos', [])[:5]:
+                print(f"  {b['type']} at ${b['level']:,.2f} ({b['direction']})")
+            for c in market_structure.get('choch', [])[:5]:
+                print(f"  {c['type']} at ${c['level']:,.2f}")
+            print()
+
+            print("SUPPORT / RESISTANCE ZONES:")
+            print("-" * 60)
+            for zone in s_r_zones.get('support', [])[:3]:
+                print(f"  Support: ${zone['price_low']:,.2f} - ${zone['price_high']:,.2f} ({zone['confidence']})")
+            for zone in s_r_zones.get('resistance', [])[:3]:
+                print(f"  Resistance: ${zone['price_low']:,.2f} - ${zone['price_high']:,.2f} ({zone['confidence']})")
+            print()
+
+            print("FIBONACCI GOLDEN ZONE:")
+            print("-" * 60)
+            for fib in fibonacci_levels.get('golden_zone', []):
+                at_zone = "AT ZONE" if fib.get('current_at_zone') else ""
+                print(f"  {fib['symbol']}: ${fib['low']:,.2f} - ${fib['high']:,.2f} {at_zone}")
+            print()
+
+            print("TRADE SIGNALS:")
+            print("-" * 60)
+            if trade_signals:
+                for ts in trade_signals:
+                    print(format_trade_signal(
+                        symbol=ts['entry_price'] and "N/A" or "N/A",  # placeholder
+                        signal_type=ts['signal_type'],
+                        entry_price=ts['entry_price'],
+                        stop_loss_price=ts['stop_loss_price'],
+                        target_price=ts['target_price'],
+                        qty=ts['qty'],
+                        risk_amount_usd=ts['risk_amount_usd'],
+                        risk_pct=ts['risk_pct'],
+                        reward_to_risk_ratio=ts['reward_to_risk_ratio'],
+                        confidence=ts['confidence'],
+                        pattern=ts['pattern'],
+                        regime=ts['regime'],
+                    ))
+            else:
+                print("  No active trade signals")
+            print()
+
+            # Full analysis report for each symbol in universe
+            for symbol in settings.universe.symbols:
+                price_data = {'current_price': latest_prices.get(symbol, 0)}
+                print(format_analysis_report(
+                    symbol=symbol,
+                    price_data=price_data,
+                    support_resistance=s_r_zones,
+                    fibonacci=fibonacci_levels,
+                    volume_profile=volume_profile,
+                    market_structure=market_structure,
+                    trade_signals=[ts for ts in trade_signals if ts.get('entry_price') > 0],
+                ))
+
             logger.info(
                 f"Strategy {current_strategy['id'][:8]} ready — "
                 f"win_rate={test_metrics.get('win_rate', 0):.2%} "
@@ -513,24 +693,25 @@ def main():
                         if price <= 0:
                             price = latest_prices.get(event["symbol"]) or _latest_close_for_symbol(test_df, event["symbol"]) or 0.0
 
-                        # Position sizing from real paper-trading outcomes (Kelly + risk cap).
-                        metrics = memory.get_trade_metrics()
-                        win_rate = metrics.get("win_rate", 0.0)
-                        avg_pnl = metrics.get("avg_pnl", 0.0)
-                        avg_win = avg_pnl if avg_pnl > 0 else 1.0
-                        avg_loss = abs(avg_pnl) if avg_pnl < 0 else 1.0
-                        equity = float(settings.risk.max_capital_usd)
-                        sizing = position_sizer.size(
-                            equity_usd=equity,
-                            win_rate=win_rate,
-                            avg_win_usd=avg_win,
-                            avg_loss_usd=avg_loss,
-                            price=price,
+                        # --- Proper risk-based position sizing ---
+                        # Get entry and stop loss from signals or calculate from price action
+                        entry_price = price
+                        stop_loss_price = event["price"] * 0.95 if event["side"] == "buy" else event["price"] * 1.05
+
+                        # Calculate position size using risk-based sizing
+                        position_size = size_position_for_trade(
+                            account_equity_usd=float(settings.risk.max_capital_usd),
+                            entry_price=entry_price,
+                            stop_loss_price=stop_loss_price,
+                            risk_pct=0.01,  # 1% risk per trade
+                            side=event["side"]
                         )
-                        qty = sizing.qty
+
+                        qty = position_size.qty
                         logger.info(
-                            f"Position sizing: {sizing.reason} notional=${sizing.notional_usd:.2f} "
-                            f"qty={sizing.qty:.4f} kelly={sizing.kelly_fraction:.3f}"
+                            f"Position sizing: Risk-based sizing - qty={qty:.4f}, "
+                            f"risk=${position_size.risk_amount_usd:.2f} "
+                            f"R:R={position_size.reward_to_risk_ratio}:1"
                         )
 
                         memory.log_trade_open(
