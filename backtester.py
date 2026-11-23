@@ -3,6 +3,11 @@
 Simulates a strategy's signals on historical data and returns realistic
 performance metrics (PnL, win rate, max drawdown, Sharpe) for the
 post-mortem / mutation loop.
+
+The equity curve is aggregated at portfolio level: per-symbol returns are
+aligned on a common timestamp index and equal-weighted, so Sharpe and
+drawdown are computed on a single coherent series rather than a flat
+concatenation of per-symbol curves that may live on different time bases.
 """
 
 import logging
@@ -24,7 +29,9 @@ class Backtester:
         self.settings = settings
         self.risk_engine = risk_engine
         self.position_usd = settings.risk.max_order_size_usd
-        # Round-trip cost as a fraction of notional: spread + slippage + commission.
+
+        # Validate costs up front — a negative round-trip cost would pay the
+        # strategy to trade, which corrupts every metric downstream.
         round_trip_bps = (
             settings.risk.spread_bps + settings.risk.slippage_bps
         )
@@ -32,6 +39,12 @@ class Backtester:
         self.round_trip_cost_usd = (
             self.position_usd * round_trip_bps / 10000.0 + 2 * comm_per_order
         )
+        if self.round_trip_cost_usd < 0:
+            logger.warning(
+                "Round-trip trading cost is negative (%s) — clamping to 0.",
+                self.round_trip_cost_usd,
+            )
+            self.round_trip_cost_usd = 0.0
 
     def run(self, strategy: BaseStrategy, df: pd.DataFrame) -> Dict[str, Any]:
         """Backtest a strategy on a multi-index (timestamp, symbol) DataFrame.
@@ -41,19 +54,18 @@ class Backtester:
         under 'trades'.
         """
         if df.empty or 'signal' not in df.columns:
-            return {
-                "pnl": 0.0, "total_trades": 0, "win_rate": 0.0,
-                "avg_pnl": 0.0, "max_drawdown": 0.0, "sharpe": 0.0,
-                "total_return_pct": 0.0, "trades": [],
-            }
+            return self._empty_metrics(reason="no_data_or_no_signals")
 
         all_trade_pnls: list = []
         all_trades: list = []
-        equity_curve: list = []
 
         try:
-            for symbol, group in df.groupby(level='symbol'):
-                group = group.sort_index()
+            # Build per-symbol return series aligned on a common timestamp index.
+            symbols = df.index.get_level_values('symbol').unique()
+            symbol_rets: Dict[str, pd.Series] = {}
+
+            for symbol in symbols:
+                group = df.xs(symbol, level='symbol').sort_index()
                 close = group['close'].astype(float)
                 signal = group['signal'].astype(float)
 
@@ -69,13 +81,17 @@ class Backtester:
                 cost_frac = self.round_trip_cost_usd / max(self.position_usd, 1e-9)
                 strat_ret = strat_ret - entry_bars.astype(float) * cost_frac
 
+                symbol_rets[symbol] = strat_ret
+
                 # Detect trades: entry when position goes 0 -> nonzero; exit when nonzero -> 0 or flips.
                 in_trade = position != 0
                 trade_starts = in_trade & (~in_trade.shift(1).fillna(False))
                 trade_ends = (~in_trade) & (in_trade.shift(1).fillna(False))
 
                 # Flip entries/exits: when position changes sign while in a trade
-                flips = (position != 0) & (position.shift(1) != 0) & (np.sign(position) != np.sign(position.shift(1)))
+                flips = (position != 0) & (position.shift(1) != 0) & (
+                    np.sign(position) != np.sign(position.shift(1))
+                )
                 trade_ends = trade_ends | flips
 
                 start_idx = None
@@ -83,24 +99,15 @@ class Backtester:
                     if trade_starts.iloc[i] and start_idx is None:
                         start_idx = i
                     elif trade_ends.iloc[i] and start_idx is not None:
-                        # Handle both tuple and non-tuple index formats
-                        def get_index(i):
-                            if isinstance(group.index[i], tuple):
-                                return group.index[i][1]
-                            return group.index[i]
-
                         entry_px = float(close.iloc[start_idx])
                         exit_px = float(close.iloc[i])
                         entry_pos = float(position.iloc[start_idx])
-                        # Calculate PnL percentage correctly based on direction
-                        if entry_pos > 0:  # LONG position
+                        if entry_pos > 0:
                             pnl_pct = (exit_px - entry_px) / entry_px
-                        else:  # SHORT position
+                        else:
                             pnl_pct = (entry_px - exit_px) / entry_px
-                        # Deduct round-trip trading cost from per-trade PnL
                         trade_pnl = pnl_pct * self.position_usd - self.round_trip_cost_usd
                         direction = "LONG" if entry_pos > 0 else "SHORT"
-                        # Was the direction right? price moved in trade's favor at exit
                         direction_right = (exit_px > entry_px) if entry_pos > 0 else (exit_px < entry_px)
                         all_trade_pnls.append(trade_pnl)
                         all_trades.append({
@@ -122,7 +129,6 @@ class Backtester:
                     exit_px = float(close.iloc[-1])
                     entry_pos = float(position.iloc[start_idx])
                     pnl_pct = (exit_px - entry_px) / entry_px if entry_pos > 0 else (entry_px - exit_px) / entry_px
-                    # Deduct round-trip trading cost from per-trade PnL
                     trade_pnl = pnl_pct * self.position_usd - self.round_trip_cost_usd
                     direction = "LONG" if entry_pos > 0 else "SHORT"
                     direction_right = (exit_px > entry_px) if entry_pos > 0 else (exit_px < entry_px)
@@ -139,17 +145,18 @@ class Backtester:
                         "direction_right": direction_right,
                     })
 
-                # Equity curve for drawdown / sharpe
-                cumulative = (1.0 + strat_ret.fillna(0.0)).cumprod()
-                equity_curve.extend(cumulative.tolist())
+            # --- Portfolio-level equity curve (equal-weighted across symbols) ---
+            if symbol_rets:
+                rets_df = pd.DataFrame(symbol_rets)
+                portfolio_ret = rets_df.mean(axis=1).fillna(0.0)
+                cumulative = (1.0 + portfolio_ret).cumprod()
+                equity_curve = cumulative.tolist()
+            else:
+                equity_curve = []
 
         except Exception as e:
             logger.error(f"Backtest error: {e}")
-            return {
-                "pnl": 0.0, "total_trades": 0, "win_rate": 0.0,
-                "avg_pnl": 0.0, "max_drawdown": 0.0, "sharpe": 0.0,
-                "total_return_pct": 0.0, "trades": [],
-            }
+            return self._empty_metrics(reason="error")
 
         total_pnl = sum(all_trade_pnls)
         total_trades = len(all_trade_pnls)
@@ -184,4 +191,18 @@ class Backtester:
             "sharpe": round(sharpe, 4),
             "total_return_pct": round(total_return_pct, 4),
             "trades": all_trades,
+        }
+
+    def _empty_metrics(self, reason: str) -> Dict[str, Any]:
+        """Return a zeroed metrics dict with a reason tag for the zero-trade gate."""
+        return {
+            "pnl": 0.0,
+            "total_trades": 0,
+            "win_rate": 0.0,
+            "avg_pnl": 0.0,
+            "max_drawdown": 0.0,
+            "sharpe": 0.0,
+            "total_return_pct": 0.0,
+            "trades": [],
+            "_reason": reason,
         }

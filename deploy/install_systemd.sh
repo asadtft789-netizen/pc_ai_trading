@@ -12,11 +12,17 @@
 
 set -euo pipefail
 
-REPO_DIR="/root/pc_ai_trading"
+# Auto-detect repo location: use the directory containing this script's parent,
+# or the current directory if run from inside the repo.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_DIR="${1:-$SCRIPT_DIR}"
 SERVICE_NAME="self_evolving_trader"
 SERVICE_FILE="deploy/systemd/${SERVICE_NAME}.service"
 
-cd "$REPO_DIR"
+cd "$REPO_DIR" || {
+    echo "ERROR: cannot find repo at $REPO_DIR"
+    exit 1
+}
 
 # 1. Pull latest code
 echo "[1/5] Pulling latest code..."
@@ -70,7 +76,7 @@ else
     sleep 1
 
     # Start in background with nohup so it survives shell exit
-    nohup python3 -u main.py >> daemon.log 2>&1 &
+    nohup python3 -u "${REPO_DIR}/main.py" >> "${REPO_DIR}/daemon.log" 2>&1 &
     echo "  Started daemon with PID: $!"
     echo ""
     echo "============================================================"
@@ -79,7 +85,7 @@ else
     echo ""
     echo "  Check status:   ps aux | grep main.py"
     echo "  Watch logs:     tail -f ${REPO_DIR}/daemon.log"
-    echo "  Restart:        pkill -f main.py && nohup python3 -u main.py >> daemon.log 2>&1 &"
+    echo "  Restart:        pkill -f main.py && nohup python3 -u ${REPO_DIR}/main.py >> ${REPO_DIR}/daemon.log 2>&1 &"
     echo "  Stop:           pkill -f main.py"
     echo ""
 fi

@@ -80,16 +80,26 @@ class PriceActionDetector:
 
             symbol_patterns = []
             for idx, row in group.iterrows():
+                # idx is (symbol, timestamp) per the Alpaca multi-index contract.
+                # idx[0] is the string ticker (no .date()), idx[1] is the timestamp.
+                # Use the timestamp level (idx[1]) for the date suffix.
+                if isinstance(idx, tuple) and len(idx) > 1:
+                    ts = idx[1]
+                    label = str(ts.date()) if hasattr(ts, "date") else str(ts)
+                elif isinstance(idx, tuple):
+                    label = str(idx[0])
+                else:
+                    label = str(idx)
                 if row.get('is_momentum', False):
-                    symbol_patterns.append(f"momentum_candle_{idx[0].date() if isinstance(idx, tuple) else idx}")
+                    symbol_patterns.append(f"momentum_candle_{label}")
                 if row.get('is_hammer', False):
-                    symbol_patterns.append(f"hammer_{idx[0].date() if isinstance(idx, tuple) else idx}")
+                    symbol_patterns.append(f"hammer_{label}")
                 if row.get('is_doji', False):
-                    symbol_patterns.append(f"doji_{idx[0].date() if isinstance(idx, tuple) else idx}")
+                    symbol_patterns.append(f"doji_{label}")
                 if row.get('is_bullish_engulfing', False):
-                    symbol_patterns.append(f"bullish_engulfing_{idx[0].date() if isinstance(idx, tuple) else idx}")
+                    symbol_patterns.append(f"bullish_engulfing_{label}")
                 if row.get('is_bearish_engulfing', False):
-                    symbol_patterns.append(f"bearish_engulfing_{idx[0].date() if isinstance(idx, tuple) else idx}")
+                    symbol_patterns.append(f"bearish_engulfing_{label}")
 
             patterns[symbol] = symbol_patterns
 

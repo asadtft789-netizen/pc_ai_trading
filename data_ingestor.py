@@ -16,6 +16,68 @@ from alpaca.data.timeframe import TimeFrame
 from config import Settings
 from memory import MemoryManager
 
+# === Advanced Market Indicators (self-evolving intelligence) ===
+
+
+def _wilder_rsi(close: pd.Series, window: int = 14) -> pd.Series:
+    """Wilder's RSI - smoothed average gain/loss oscillator."""
+    delta = close.diff()
+    gain = delta.clip(lower=0)
+    loss = (-delta).clip(lower=0)
+    avg_gain = gain.rolling(window=window, min_periods=1).mean()
+    avg_loss = loss.rolling(window=window, min_periods=1).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
+
+def _atr(df: pd.DataFrame, window: int = 14) -> pd.Series:
+    """Average True Range - volatility measure."""
+    high = df['high']
+    low = df['low']
+    close = df['close'].shift(1)
+    tr = np.maximum(high - low, np.maximum((high - close).abs(), (low - close).abs()))
+    return tr.rolling(window=window, min_periods=1).mean()
+
+
+def _adx(df: pd.DataFrame, window: int = 14) -> pd.Series:
+    """Average Directional Index - trend strength (0-100)."""
+    high = df['high']
+    low = df['low']
+    close = df['close']
+    up_move = high.diff()
+    down_move = -low.diff()
+
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+
+    tr = _atr(df, window=window)
+    tr_smooth = tr.rolling(window=window, min_periods=1).sum()
+    plus_di = 100 * pd.Series(plus_dm, index=tr.index).rolling(window=window, min_periods=1).sum() / tr_smooth.replace(0, np.nan)
+    minus_di = 100 * pd.Series(minus_dm, index=tr.index).rolling(window=window, min_periods=1).sum() / tr_smooth.replace(0, np.nan)
+
+    dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
+    adx = dx.rolling(window=window, min_periods=1).mean()
+    return adx
+
+
+def _ema(close: pd.Series, span: int) -> pd.Series:
+    """Exponential Moving Average."""
+    return close.ewm(span=span, adjust=False).mean()
+
+
+def _add_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    """Add RSI, ATR, ADX, EMA20/EMA50 to every symbol group in a multi-index DataFrame."""
+    res = df.copy()
+    close = res.groupby(level="symbol")["close"]
+
+    res["rsi"] = close.transform(_wilder_rsi)
+    res["atr"] = res.groupby(level="symbol").apply(lambda g: _atr(g), include_groups=False).reset_index(level=0, drop=True)
+    res["adx"] = res.groupby(level="symbol").apply(lambda g: _adx(g), include_groups=False).reset_index(level=0, drop=True)
+    res["ema20"] = close.transform(lambda x: _ema(x, span=20))
+    res["ema50"] = close.transform(lambda x: _ema(x, span=50))
+    return res
+
 
 class DataIngestor:
     """Handles fetching market data and identifying market regimes."""
@@ -175,5 +237,11 @@ class DataIngestor:
 
         train_df = df.loc[train_mask].copy()
         test_df = df.loc[test_mask].copy()
+
+        # Enrich with advanced indicators so strategies see RSI/ATR/ADX/EMA features.
+        if not train_df.empty:
+            train_df = _add_indicators(train_df)
+        if not test_df.empty:
+            test_df = _add_indicators(test_df)
 
         return train_df, test_df

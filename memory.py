@@ -7,7 +7,7 @@ market regimes, and LLM-generated reflections for the post-mortem loop.
 import os
 import sqlite3
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from dataclasses import asdict
 
@@ -137,12 +137,12 @@ class MemoryManager:
                  start_date.isoformat(), end_date.isoformat())
             )
 
-    def log_trade(self, order_id: str, strategy_id: str, symbol: str, qty: float, side: str, status: str, regime_id: Optional[int] = None, direction_right: Optional[int] = None):
+    def log_trade(self, order_id: str, strategy_id: str, symbol: str, qty: float, side: str, status: str, regime_id: Optional[int] = None, direction_right: Optional[int] = None, entry_price: Optional[float] = None, filled_at: Optional[str] = None):
         with self._get_connection() as conn:
             conn.execute(
-                """INSERT INTO trades (id, strategy_id, symbol, qty, side, status, regime_id, direction_right)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                (order_id, strategy_id, symbol, qty, side, status, regime_id, direction_right)
+                """INSERT INTO trades (id, strategy_id, symbol, qty, side, status, regime_id, direction_right, entry_price, filled_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (order_id, strategy_id, symbol, qty, side, status, regime_id, direction_right, entry_price, filled_at)
             )
 
     def update_trade(self, order_id: str, exit_price: Optional[float] = None, pnl: Optional[float] = None, status: Optional[str] = None, direction_right: Optional[int] = None):
@@ -216,13 +216,15 @@ class MemoryManager:
             return [dict(row) for row in rows]
 
     def get_daily_pnl(self) -> float:
-        """Sum of realized PnL for trades filled today."""
+        """Sum of realized PnL for trades filled today (UTC)."""
         try:
+            today = datetime.now(timezone.utc).date().isoformat()
             with self._get_connection() as conn:
                 row = conn.execute(
                     "SELECT COALESCE(SUM(pnl), 0) FROM trades "
                     "WHERE status = 'filled' AND pnl IS NOT NULL "
-                    "AND date(created_at) = date('now')"
+                    "AND date(created_at) = date(?)",
+                    (today,),
                 ).fetchone()
             return float(row[0]) if row else 0.0
         except Exception:
@@ -244,8 +246,13 @@ class MemoryManager:
             ).fetchall()
             return [dict(row) for row in rows]
 
-    def log_trade_open(self, order_id: str, strategy_id: str, symbol: str, qty: float, side: str, regime_id: Optional[int] = None) -> None:
-        self.log_trade(order_id, strategy_id, symbol, qty, side, "open", regime_id)
+    def log_trade_open(self, order_id: str, strategy_id: str, symbol: str, qty: float, side: str, regime_id: Optional[int] = None, entry_price: Optional[float] = None) -> None:
+        now_iso = datetime.now(timezone.utc).isoformat()
+        self.log_trade(
+            order_id, strategy_id, symbol, qty, side, "open", regime_id,
+            entry_price=entry_price,
+            filled_at=now_iso,
+        )
 
     def get_active_strategy(self) -> Optional[Dict[str, Any]]:
         strategies = self.get_active_strategies()
@@ -312,13 +319,22 @@ class MemoryManager:
     def increment_strategy_failure(self, strategy_id: str) -> None:
         """Increment failure counter for a strategy. If first failure, initialize to 1."""
         with self._get_connection() as conn:
-            conn.execute("""
-                INSERT INTO strategy_failures (strategy_id, failure_count, last_failure, reset_at)
-                VALUES (?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-                ON CONFLICT(strategy_id) DO UPDATE SET
-                    failure_count = failure_count + 1,
-                    last_failure = CURRENT_TIMESTAMP
-            """, (strategy_id,))
+            row = conn.execute(
+                "SELECT failure_count FROM strategy_failures WHERE strategy_id = ?",
+                (strategy_id,),
+            ).fetchone()
+            if row is None:
+                conn.execute(
+                    "INSERT INTO strategy_failures (strategy_id, failure_count, last_failure, reset_at) "
+                    "VALUES (?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+                    (strategy_id,),
+                )
+            else:
+                conn.execute(
+                    "UPDATE strategy_failures SET failure_count = failure_count + 1, "
+                    "last_failure = CURRENT_TIMESTAMP WHERE strategy_id = ?",
+                    (strategy_id,),
+                )
 
     def get_strategy_failure_count(self, strategy_id: str) -> int:
         """Get the current failure count for a strategy (0 if not found)."""

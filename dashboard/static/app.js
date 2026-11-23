@@ -157,27 +157,27 @@ async function loadTrades() {
 
     row.innerHTML = `
       <td>${fmtTime(t.created_at)}</td>
-      <td>${t.symbol || "—"}</td>
-      <td class="${sideClass}">${t.side || "—"}</td>
+      <td>${escapeHtml(t.symbol || "—")}</td>
+      <td class="${sideClass}">${escapeHtml(t.side || "—")}</td>
       <td>${t.entry_price != null ? t.entry_price.toFixed(4) : "—"}</td>
       <td>${t.exit_price != null ? t.exit_price.toFixed(4) : "—"}</td>
       <td class="${pnlClass(t.pnl)}">${money(t.pnl)}</td>
-      <td class="${obsClass}">${obs}</td>
-      <td class="${statusClass}">${(t.status || "—").toUpperCase()}</td>
+      <td class="${obsClass}">${escapeHtml(obs)}</td>
+      <td class="${statusClass}">${escapeHtml((t.status || "—").toUpperCase())}</td>
     `;
     body.appendChild(row);
 
     const row2 = row.cloneNode(true);
     row2.innerHTML = `
       <td>${fmtTime(t.created_at)}</td>
-      <td>${t.symbol || "—"}</td>
-      <td class="${sideClass}">${t.side || "—"}</td>
+      <td>${escapeHtml(t.symbol || "—")}</td>
+      <td class="${sideClass}">${escapeHtml(t.side || "—")}</td>
       <td>${t.qty != null ? t.qty.toFixed(4) : "—"}</td>
       <td>${t.entry_price != null ? t.entry_price.toFixed(4) : "—"}</td>
       <td>${t.exit_price != null ? t.exit_price.toFixed(4) : "—"}</td>
       <td class="${pnlClass(t.pnl)}">${money(t.pnl)}</td>
-      <td class="${obsClass}">${obs}</td>
-      <td class="${statusClass}">${(t.status || "—").toUpperCase()}</td>
+      <td class="${obsClass}">${escapeHtml(obs)}</td>
+      <td class="${statusClass}">${escapeHtml((t.status || "—").toUpperCase())}</td>
     `;
     allBody.appendChild(row2);
   });

@@ -35,10 +35,12 @@ from config import Settings
 # ---------------------------------------------------------------------------
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(BASE_DIR, "data")
-MEMORY_DB = os.path.join(DATA_DIR, "memory.sqlite")
 DRIFT_DB = os.path.join(DATA_DIR, "drift.sqlite")
 
 settings = Settings.load(env_path=os.path.join(BASE_DIR, ".env"))
+MEMORY_DB = settings.runtime.db_path or os.path.join(DATA_DIR, "memory.sqlite")
+# Read-only URI so the dashboard can never mutate the daemon's database.
+MEMORY_DB_RO = "file:" + MEMORY_DB + "?mode=ro"
 
 app = FastAPI(title="Self-Evolving Trading AI — Dashboard")
 
@@ -59,7 +61,7 @@ def _dict_row(row) -> Optional[Dict[str, Any]]:
 
 
 def _query_memory(sql: str, params: tuple = ()) -> List[Dict[str, Any]]:
-    conn = sqlite3.connect(MEMORY_DB)
+    conn = sqlite3.connect(MEMORY_DB_RO, uri=True)
     conn.row_factory = sqlite3.Row
     try:
         return [dict(r) for r in conn.execute(sql, params).fetchall()]
@@ -68,7 +70,7 @@ def _query_memory(sql: str, params: tuple = ()) -> List[Dict[str, Any]]:
 
 
 def _query_memory_one(sql: str, params: tuple = ()) -> Optional[Dict[str, Any]]:
-    conn = sqlite3.connect(MEMORY_DB)
+    conn = sqlite3.connect(MEMORY_DB_RO, uri=True)
     conn.row_factory = sqlite3.Row
     try:
         row = conn.execute(sql, params).fetchone()
@@ -263,7 +265,7 @@ def api_equity_curve():
     return JSONResponse(points)
 
 
-@app.get("/api/price-chart/{symbol}")
+@app.get("/api/price-chart/{symbol:path}")
 def api_price_chart(symbol: str):
     """OHLC + signal data for a symbol's price chart.
 

@@ -92,149 +92,49 @@ class StrategyMutator:
         # This list is read from the skills directories at runtime; here we build it
         # as a static snapshot so the prompt stays self-contained.
         skills_catalog = """
-Available Skills (from ml4t & Claude-Trading-Skills repos):
-
-# ML4T Skills (61 skill modules)
-- advanced-ai/agent-state-memory — structured agent state, evidence, tool trace, decisions, quality gates; enables self‑reflection and replay.
-- advanced-ai/multi-agent-forecasting — multi‑agent forecasting pipelines with consensus and disagreement metrics.
-- backtest/cost-model — full market‑impact, latency, and fee modeling for realistic backtest costs.
-- backtest/rl-execution — reinforcement‑learning based execution modeling.
-- backtest/run-backtest — configurable backtest runner with walk‑forward CV, purging/embargo, and tearsheet output.
-- backtest/sensitivity-analysis — parameter sensitivity and robustness analysis.
-- concepts/causal-identification — causal inference tools (convergent cross‑mapping, do‑calculus style).
-- concepts/data-leakage — data‑leakage detection and purging utilities.
-- concepts/information-coefficient — IC computation and rank‑correlation over rolling windows.
-- concepts/lookahead-bias — look‑ahead bias detection in feature windows.
-- concepts/non-stationarity — detect and adapt to non‑stationary regimes.
-- concepts/point-in-time — point‑in‑time correct feature joins.
-- concepts/regime-awareness — regime‑detection and features that vary by market regime.
-- concepts/survivorship-bias — survivorship bias correction for universe datasets.
-- data/calendar-ops — calendar arithmetic, business‑day arithmetic, holiday calendars.
-- data/continuous-futures — continuous futures roll conventions.
-- data/data-export — export to CSV, Parquet, JSON formats.
-- data/define-universe — universe definition (tick‑ers, sectors, market‑caps).
-- data/fetch-data — fetching from IEX, Alpaca, Yahoo, FMP, etc.
-- data/validate-data — schema validation, missing‑value handling, out‑of‑range checks.
-- features/feature-families — family of features (technical, macro, fundamental).
-- features/feature-selection — recursive elimination, SHAP‑based selection, variance filtering.
-- features/feature-store — feature store with versioning and retrieval.
-- features/horizon-design — horizon design for label generation (triple‑barrier, etc.).
-- features/meta-labels — meta‑label generation for weak supervision.
-- features/latent-factors — latent factor extraction (PCA, ICA, NMF).
-- features/regime-features — regime‑specific feature pipelines.
-- infrastructure/canonical-schema — canonical data schema definition across sources.
-- infrastructure/registry-system — skill/metric/strategy registry with URIs.
-- portfolio/exposure-analysis — exposure at risk (EaR), sector/concentration limits.
-- portfolio/kill-switch — automatic kill‑switch triggered by drawdown or regime change.
-- portfolio/position-sizing — volatility‑based and ATR‑based position sizing.
-- portfolio/stress-test — stress‑test portfolio under historical scenarios.
-- production/live-trading — live‑trading bridge, order management, state sync.
-- production/monitoring-alerting — monitoring, alerting, health‑check endpoints.
-- scripts/run_scripts.py — batch runner for skill pipelines.
-- tests/walk_forward_cv.py — walk‑forward cross‑validation harness.
-- validation/cpcv — conditional probability cross‑validation.
-- validation/deflated-sharpe — Sharpe adjustment for multiple‑testing bias.
-- validation/drift-detection — drift detection (KS, ADWIN, Page‑Hinkley).
-- validation/evaluate-factor — factor evaluation (information coefficient, quantile return).
-- validation/purging-embargo — embargo‑aware CV splitter.
-- validation/shap-analysis — SHAP values for feature importance and partial dependence.
-- validation/stationarity-tests — stationarity tests (PPF, DFGLS, N-gap).
-- validation/walk-forward-cv — full walk‑forward CV pipeline.
-
-# Claude‑Trading‑Skills (74 skill modules)
-- technical-analyst — chart‑based technical analysis (trends, S/R, patterns, probabilistic scenarios).
-- market-breadth-analyzer — market‑breadth indicators (advance/decline line, McClellan summation, new highs‑lows).
-- position-sizer — Kelly‑criterion, fixed‑fraction, volatility‑adjusted position sizing.
-- pre-trade-discipline-gate — checklist (volatility, liquidity, news, margin, concentration) before trade entry.
-- signal-postmortem — post‑trade review: what worked, what didn’t, rule recommendations.
-- trader-memory-core — structured memory store (state, reflections, rules, trade journal).
+# Core skills the LLM may reference when generating strategies:
+- advanced-ai/agent-state-memory — structured agent state and self-reflection.
+- portfolio/position-sizing — volatility-based position sizing.
+- technical-analyst — chart-based technical analysis (trends, S/R, patterns).
+- signal-postmortem — post-trade review: what worked, what didn't.
 - signal-idea-miner — idea discovery from historical pattern mining.
-- skill-idea-miner — auto‑idea generation from strategy‐attribute mining.
-- skill-integration-tester — test‑harness for integrating new skills into the mutator loop.
-- exposure-coach — exposure advisement per‑trade and portfolio‑wide.
-- drawdown-circuit-breaker — automatic circuit‑breaker when max drawdown threshold hit.
-- backtest-expert — end‑to‑end backtest pipeline (data → features → strategy → metrics → report).
-- weekly-performance-digest — weekly summary of trades, metrics, regime changes, lessons learned.
-- uptrend-analyzer — uptrend detection (higher highs/higher lows, ADX, trend‑strength filters).
-- vcp-screener — Victoriano Charts Pattern screener (left‑side/right‑side, volume confirmation).
-- technical-analyst — (duplicate entry for breadth of capability).
-- position-sizer — (duplicate entry for breadth of capability).
-- portfolio-manager — overall portfolio allocation, risk limits, rebalancing.
-- Contrarian‑setup‑gate — contrarian entry logic with fundamental confirmation.
-- crypto-regime-analyzer — crypto‑specific regime detection (BTC/ETH cycles, on‑chain metrics).
-- data-quality-checker — data‑quality reports (missingness, outliers, type‑checking).
-- dividend-growth-pullback-screener — dividend‑growth stocks with pullback entry signals.
-- canslim-screener — CAN SLIM screen (momentum, earnings, supply/demand).
-- contrarian-setup-gate — contrarian setup with fundamental overlay.
-- cot-contrarian-detector — COT (Commitments of Traders) contrarian signals.
-- economic-calendar-fetcher — economic calendar events (Fed, CPI, NFP, etc.).
-- edge-candidate-agent — evaluates whether a candidate edge is statistically significant.
-- edge-concept-synthesizer — synthesizes new trading concepts from attribute combinations.
-- edge-hint-extractor — extracts hint vectors (feature subsets) from historical data.
-- edge-pipeline-orchestrator — orchestrates multi‑step edge‑discovery pipelines.
-- edge-strategy-designer — designs new strategy concepts from edge hypotheses.
-- edge-strategy-reviewer — reviews candidate strategies against edge criteria.
-- finviz-screener — Finviz‑based screener (technical + fundamental filters).
-- ft-detector — failure‑time detector for trade signals.
-- futures-position-sizer — futures‑specific position sizing (margin, point‑value).
-- fxmacrodata-calendar — FX macro data calendar (interest‑rate decisions, central‑bank speak).
-- ibd-distribution-day-monitor — IBD Distribution‑Day monitor.
-- institutional-flow-tracker — institutional flow tracking (13F, block trades).
-- kanchi-dividend-review-monitor — dividend review monitor (kanchi system).
-- kanchi-dividend-sop — Statement of Policy for dividend decisions.
-- kanchi-dividend-us-tax-accounting — US tax‑accounting for dividends.
-- macro-regime-detector — macro regime detector (GDP, CPI, employment, yield curve).
-- manifoldbt-backtester — ManifoldBT backtest engine (Python/C++ hybrid).
-- market-top-detector — market‑top detection (VIX, put/call ratio, advance/decline).
-- news-reaction-failure-analyzer — news‑event reaction analysis (did price over‑react?).
-- options-strategy-advisor — options strategy recommendation (vertical, straddle, ratio).
-- pair-trade-screener — pair‑trading cointegration + spread‑trading signals.
-- parabolic-short-trade-planner — parabolic‑short entry/exit planner.
-- pead-screener — post‑earnings‑announcement‑drift screener.
-- sector-analyst — sector‑level analysis (relative strength, rotation).
-- scenario-analyzer — scenario analysis (best/base/worst case).
-- skill-designer — meta‑skill: design a new skill given a problem statement.
-- skill-idea-miner — miner of skill ideas from historical strategy attributes.
-- stockbee-20pct-study — Stockbee 20‑% study (pivot/entry patterns).
-- stockbee-episodic-pivot-analyzer — episodic pivot analysis (Stockbee).
-- stockbee-exhaustion-hammer-screener — exhaustion‑hammer screener (Stockbee).
-- stockbee-momentum-burst-screener — momentum‑burst screener (Stockbee).
-- stockbee-setup-fluency‑trainer — fluency trainer for Stockbee setups.
-- strategy-pivot‑designer — meta‑designer for strategy pivots.
-- theme-detector — theme detection (trend/theme extraction from price action).
-- trade-hypothesis-ideator — hypothesis ideation from historical data.
-- trade-performance-coach — performance coaching (expectancy, risk‑of‑ruin).
-- us-market-bubble-detector — US market bubble detection (Minsky, M2, credit growth).
-- us-stock-analysis — US stock fundamental + technical analysis.
-- us-undervalued-growth-screener — US undervalued‑growth screener.
-- value-dividend-screener — value + dividend screener.
-
-Use any of these as building blocks when the LLM generates or mutates a strategy. You MAY import and reference any of the above skill modules by their full dotted path (e.g., `from ml4t.advanced_ai.agent_state_memory import AgentStateMemory`). The LLM should embed calls to the most relevant skill functions inside the generated Python code.
 """
 
         system_context = """
-You are an expert quantitative trading researcher. Your task is to write a Python trading strategy.
-The strategy MUST be a subclass of `BaseStrategy` and implement the `generate_signals(self, df: pd.DataFrame) -> pd.DataFrame` method.
+You are an ELITE Quantitative Trading Strategist and Senior Quant Developer.
+Your goal is to design a high-alpha, low-drawdown Python trading strategy using advanced price action and market structure logic.
+
+INTELLIGENCE CORE:
+1. MARKET STRUCTURE FIRST: Determine if trending (Higher Highs/Lows) or range-bound before any entry.
+2. LIQUIDITY & ZONES: Use Supply/Demand zones and Volume Point of Control (POC) for precision entries.
+3. CONFLUENCE: Multiple indicators must agree before signaling (e.g., RSI divergence + BOS + Fib Retracement).
+4. DYNAMIC RISK: Adjust stop-losses based on ATR (Average True Range).
+5. VECTORIZED EXCELLENCE: Use pandas 'transform', 'rolling', 'groupby' for zero-loop signal generation.
 
 Interface:
 - Input `df`: Multi-index (timestamp, symbol) with columns [open, high, low, close, volume].
 - Output: The same `df` with a 'signal' column (1 for Buy, -1 for Sell, 0 for Neutral).
-- Avoid look-ahead bias.
-- Use vectorized operations with pandas/numpy for efficiency.
-- Focus on swing trading (holding periods of days to weeks).
+- NO LOOK-AHEAD BIAS: Signals at time T use only data up to T.
+- Focus on SWING TRADING (holding periods of 3-14 days).
 
 Market Context:
 Current Regime: {regime}
 Indicators: {indicators}
 
-Hard Rules (MUST ALL BE FOLLOWED, combined from all past lessons):
+Hard Rules (MUST BE ENFORCED):
 {rules}
 
-Recent Reflections:
+Prior Knowledge/Lessons:
 {reflections}
 
 ---
 {SKILL_CATALOG}
+
+THINK STEP-BY-STEP:
+1. Analyze the current market regime and provided indicators.
+2. Formulate a hypothesis for high-probability swing setups.
+3. Implement logic using robust, vectorized pandas code.
+4. Add safety filters (volume confirmation, RSI cooling).
 """
 
         # --- End skills catalog ---

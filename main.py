@@ -2,7 +2,7 @@ import logging
 import time
 import json
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List
 from config import Settings
 from memory import MemoryManager
@@ -46,12 +46,42 @@ from skills.tradermonty.skills.price_action_swing_trading.risk_sizing import (
 logger = logging.getLogger(__name__)
 
 
-def _setup_logging(log_level: str = "INFO") -> None:
+class SecretRedactingFilter(logging.Filter):
+    """Redacts configured secrets (API keys, tokens) from every log line so
+    credentials never land in daemon.log or journald."""
+    def __init__(self, secrets: List[str]):
+        super().__init__()
+        self.secrets = [s for s in secrets if s]
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if not self.secrets:
+            return True
+        msg = record.getMessage()
+        for secret in self.secrets:
+            if secret and len(secret) >= 8:
+                msg = msg.replace(secret, "[REDACTED]")
+        record.msg = msg
+        record.args = ()
+        return True
+
+
+def _setup_logging(log_level: str = "INFO", settings: Optional[Settings] = None) -> None:
     """Configure logging for both local and unattended/remote operation.
 
     Writes to stdout (captured by systemd/journald when run as a service)
-    and to daemon.log for local inspection.
+    and to daemon.log for local inspection. Secrets are redacted from all
+    output.
     """
+    secrets: List[str] = []
+    if settings is not None:
+        for val in (
+            settings.alpaca.api_key,
+            settings.alpaca.api_secret,
+            settings.llm.api_key,
+            settings.llm.fallback_api_key,
+        ):
+            if val and val != "your_llm_api_key_here":
+                secrets.append(val)
     logging.basicConfig(
         level=getattr(logging, str(log_level).upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -59,16 +89,34 @@ def _setup_logging(log_level: str = "INFO") -> None:
             logging.StreamHandler(),  # systemd / journald captures stdout
             logging.FileHandler("daemon.log"),
         ],
+        force=True,
     )
+    logging.getLogger().addFilter(SecretRedactingFilter(secrets))
 
+
+# Builtins allowed inside exec()'d LLM-generated strategy code — nothing more.
+_SAFE_BUILTINS = {
+    "abs": abs, "all": all, "any": any, "bool": bool, "dict": dict,
+    "enumerate": enumerate, "filter": filter, "float": float, "int": int,
+    "isinstance": isinstance, "len": len, "list": list, "map": map,
+    "max": max, "min": min, "range": range, "reversed": reversed,
+    "round": round, "set": set, "sorted": sorted, "str": str, "sum": sum,
+    "tuple": tuple, "zip": zip,
+}
 
 def _load_strategy_instance(strategy_row: Dict[str, Any]) -> Optional[BaseStrategy]:
-    """Dynamically loads an LLM-generated strategy class from its stored code."""
+    """Dynamically loads an LLM-generated strategy class from its stored code.
+
+    The code runs in a sandbox: __builtins__ is restricted to a safe subset,
+    no file/network/os access is exposed, so a malicious or buggy LLM strategy
+    cannot escape the strategy interface.
+    """
     code = strategy_row.get("code")
     if not code:
         return None
     try:
         namespace: Dict[str, Any] = {
+            "__builtins__": _SAFE_BUILTINS,
             "BaseStrategy": BaseStrategy,
             "pd": pd,
             "np": __import__("numpy"),
@@ -267,8 +315,8 @@ def _try_rule_fix(mutator: StrategyMutator,
 
 def main():
     # 1. Initialize components
-    _setup_logging()
     settings = Settings.load(env_path=".env")
+    _setup_logging(log_level=settings.log_level, settings=settings)
     memory = MemoryManager(settings)
     risk_engine = RiskEngine(settings)
     data_ingestor = DataIngestor(settings, memory)
@@ -512,6 +560,24 @@ def main():
                 memory.reset_strategy_failure(current_strategy['id'])
                 signals = _signals_from_test(test_signals_df)
 
+            # --- Champion / challenger promotion ---
+            # A strategy that passes the held-out test gate becomes the champion
+            # if no champion exists yet. The incumbent is kept as a challenger so
+            # future strategies can be compared against both.
+            try:
+                with memory._get_connection() as conn:
+                    existing = conn.execute(
+                        "SELECT id FROM strategies WHERE status = 'champion' LIMIT 1"
+                    ).fetchone()
+                if existing is None:
+                    memory.update_strategy_status(current_strategy['id'], 'champion')
+                    logger.info(
+                        f"Promoted {current_strategy['id'][:8]} to champion "
+                        f"(test Sharpe={test_metrics.get('sharpe', 0):.2f})."
+                    )
+            except Exception as e:
+                logger.debug(f"Champion promotion check skipped: {e}")
+
             # --- Build trading signals with full trade details ---
             trade_signals = []
             for symbol, signal in signals.items():
@@ -665,7 +731,11 @@ def main():
 
             for ev in exit_events:
                 sym = ev['symbol']
-                memory.close_trade_for_symbol(sym, ev['price'], ev['pnl'])
+                # Close by order_id (trade ID) so multiple lots of the same symbol
+                # are tracked independently instead of clobbering each other.
+                order_id = ev.get('order_id')
+                if order_id:
+                    memory.close_trade_by_order_id(order_id, ev['price'], ev['pnl'])
                 executor._close_position(sym)
                 logger.info(
                     f"EXIT {ev['reason']}: {sym} {ev['side']} qty={ev['qty']} "
@@ -677,15 +747,18 @@ def main():
                         drift_detector.record_outcome(
                             rule_id=rule['id'],
                             rule_text=rule['rule_text'],
-                            trade_id=str(ev['symbol'] + ev['price']),
+                            trade_id=str(order_id or f"{sym}:{ev['price']}"),
                             pnl=float(ev['pnl']),
-                            trade_date=datetime.now(),
+                            trade_date=datetime.now(timezone.utc),
                         )
                 except Exception as e:
                     logger.debug(f"Drift outcome record skipped: {e}")
 
             # G. Reconcile DB open trades with Alpaca (mark filled if position gone)
-            reconciled = executor.reconcile_trades(open_trades, latest_prices)
+            reconciled, snapshot_ok = executor.reconcile_trades(open_trades, latest_prices)
+            if not snapshot_ok:
+                logger.warning("Broker snapshot unavailable during reconciliation — "
+                               "leaving open trades as 'unknown' (never fabricating fills).")
             for t in reconciled:
                 if t['status'] == 'filled':
                     memory.close_trade_by_order_id(t['id'], t['price'], t['pnl'])
