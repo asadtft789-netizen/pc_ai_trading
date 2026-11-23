@@ -5,17 +5,17 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/opt/self_evolving_trader
-ExecStartPre=/usr/bin/python3 -m pip install -r requirements.txt
-ExecStart=/usr/bin/python3 /opt/self_evolving_trader/main.py
+WorkingDirectory=/root/pc_ai_trading
+ExecStartPre=/usr/bin/python3 -m pip install -q -r requirements.txt
+ExecStart=/usr/bin/python3 -u /root/pc_ai_trading/main.py
 Restart=always
 RestartSec=60
 Environment=PYTHONUNBUFFERED=1
-EnvironmentFile=/opt/self_evolving_trader/.env
+EnvironmentFile=/root/pc_ai_trading/.env
 
-# Run as a dedicated non-root user for safety
-User=trader
-Group=trader
+# Run as root (user's setup)
+User=root
+Group=root
 
 # Logs go to journald; view with: journalctl -u self_evolving_trader -f
 StandardOutput=journal
