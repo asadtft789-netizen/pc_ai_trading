@@ -145,8 +145,8 @@ class Settings:
                 )
             ),
             runtime=RuntimeConfig(
-                data_dir=_getenv("DATA_DIR", "C:/self_evolving_trader/data"),
-                db_path=_getenv("DB_PATH", "C:/self_evolving_trader/data/memory.sqlite"),
+                data_dir=_getenv("DATA_DIR", "data"),
+                db_path=_getenv("DB_PATH", "data/memory.sqlite"),
                 log_level=_getenv("LOG_LEVEL", "INFO"),
             ),
         )

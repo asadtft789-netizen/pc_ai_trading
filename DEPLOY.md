@@ -119,8 +119,23 @@ cat /opt/self_evolving_trader/daemon.log
 - The SQLite database (`data/memory.sqlite`) persists strategies, trades, and learned rules across restarts.
 - Your laptop can be closed once the remote service is started — the daemon runs independently.
 
+## Pterodactyl Panel setup
+
+If you're using a Pterodactyl panel (not a full VPS), systemd does not exist inside the container — the panel itself supervises and restarts the process.
+
+1. Create a new **Python** server in Pterodactyl.
+2. **Startup command:** `bash /home/container/deploy/pterodactyl/start.sh`
+3. **Before first boot**, upload your `.env` and edit these paths for Linux:
+   ```
+   DATA_DIR=/home/container/data
+   DB_PATH=/home/container/data/memory.sqlite
+   ```
+   (Your laptop's `.env` uses Windows paths like `C:/...`; those will crash inside the container.)
+4. **Upload project files** via the panel's File Manager (or SFTP/FTP): copy everything **except** `.git`, `__pycache__`, `data/`, and `daemon.log`.
+5. Start the server. First boot installs Python dependencies (~2 minutes). Check the console to confirm `main.py` launched.
+
 ## Security notes
 
-- `.env` contains API secrets — transfer it directly (scp), never commit it to git.
+- `.env` contains API secrets — transfer it directly (scp / SFTP), never commit it to git.
 - The system uses Alpaca **paper trading** by default (`paper=True` in `executor.py`), so no real money is at risk unless you change the base URL.
-- The daemon runs as a non-root `trader` user for safety.
+- The daemon runs as a non-root `trader` user for safety on a real VPS; inside Pterodactyl it runs as the container's default user.
