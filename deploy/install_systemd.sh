@@ -12,7 +12,7 @@
 
 set -euo pipefail
 
-REPO_DIR="/root/pc_ai_trader"
+REPO_DIR="/root/pc_ai_trading"
 SERVICE_NAME="self_evolving_trader"
 SERVICE_FILE="deploy/systemd/${SERVICE_NAME}.service"
 
