@@ -4,15 +4,11 @@ Fetches historical data from Alpaca and categorizes market conditions
 to help the LLM understand the context of strategy performance.
 """
 
+from __future__ import annotations
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Any
-from alpaca.data.enums import DataFeed
-from alpaca.data.historical import StockHistoricalDataClient, CryptoHistoricalDataClient
-from alpaca.data.requests import StockBarsRequest, CryptoBarsRequest
-from alpaca.data.timeframe import TimeFrame
-
 from config import Settings
 from memory import MemoryManager
 
@@ -83,6 +79,7 @@ class DataIngestor:
     """Handles fetching market data and identifying market regimes."""
 
     def __init__(self, settings: Settings, memory: MemoryManager):
+        from alpaca.data.historical import StockHistoricalDataClient, CryptoHistoricalDataClient
         self.settings = settings
         self.memory = memory
         self.stock_client = StockHistoricalDataClient(
@@ -96,6 +93,8 @@ class DataIngestor:
         self, symbols: List[str], timeframe: TimeFrame, start: datetime, end: datetime
     ) -> pd.DataFrame:
         """Fetches historical bars for a mix of equities and cryptos."""
+        from alpaca.data.requests import StockBarsRequest, CryptoBarsRequest
+        from alpaca.data.enums import DataFeed
         equities = [s for s in symbols if s in self.settings.universe.equities]
         cryptos = [s for s in symbols if s in self.settings.universe.cryptos]
 
@@ -134,9 +133,10 @@ class DataIngestor:
 
     def get_latest_data(self) -> pd.DataFrame:
         """Fetches the most recent market data for the trade universe."""
-        end = datetime.now()
+        from alpaca.data.timeframe import TimeFrame
+        end = datetime.now(timezone.utc)
         start = end - timedelta(days=30)
-        return self.fetch_bars(self.settings.universe.symbols, TimeFrame.Day, start, end)
+        return self.fetch_bars(self.settings.universe.symbols, TimeFrame.Hour, start, end)
 
     def detect_regime(self, df: pd.DataFrame) -> Dict[str, Any]:
         """
@@ -171,9 +171,9 @@ class DataIngestor:
         long_ma = float(long_ma_series.iloc[-1]) if len(long_ma_series.dropna()) > 0 else 0.0
 
         indicators = {
-            "avg_return_20d": float(trend),
-            "volatility_20d": float(vol),
-            "momentum_ratio": float(short_ma / long_ma) if long_ma != 0 else 1.0,
+            "trend": float(trend),
+            "volatility": float(vol),
+            "momentum": float(short_ma / long_ma) if long_ma != 0 else 1.0,
         }
 
         # Heuristic labeling
@@ -186,21 +186,22 @@ class DataIngestor:
         elif trend < -0.001 and vol >= 0.01:
             label = "bear_volatile"
         else:
-            label = "sideways"
+            label = "sideways_volatile" if vol >= 0.01 else "sideways_quiet"
 
         return {"label": label, "indicators": indicators}
 
     def update_market_context(self):
         """Fetches recent data, detects regime, and persists it."""
-        end = datetime.now()
+        from alpaca.data.timeframe import TimeFrame
+        end = datetime.now(timezone.utc)
         start = end - timedelta(days=30)
 
         # Use a representative subset for regime detection
         symbols = self.settings.universe.symbols
-        df = self.fetch_bars(symbols, TimeFrame.Day, start, end)
+        df = self.fetch_bars(symbols, TimeFrame.Hour, start, end)
 
         if not df.empty:
-            regime = self.detect_regime(data=df)
+            regime = self.detect_regime(df)
             regime_id = self.memory.save_regime(regime["label"], regime["indicators"])
             return regime_id
         return None
@@ -215,18 +216,24 @@ class DataIngestor:
 
         Returns (train_df, test_df) — both multi-index (timestamp, symbol) DataFrames.
         """
-        end = datetime.now()
+        from alpaca.data.timeframe import TimeFrame
+        end = datetime.now(timezone.utc)
         # Start far enough back to cover both train and test windows
         start = end - timedelta(days=train_days + test_days + 5)
 
         symbols = self.settings.universe.symbols
-        df = self.fetch_bars(symbols, TimeFrame.Day, start, end)
+        df = self.fetch_bars(symbols, TimeFrame.Hour, start, end)
 
         if df.empty:
             return pd.DataFrame(), pd.DataFrame()
 
         # Sort by timestamp to ensure chronological split
-        df = df.sort_index()
+        df = df.reorder_levels(['symbol','timestamp']).sort_index()
+        ts=df.index.get_level_values('timestamp')
+        if ts.tz is None:raise ValueError('expected timezone-aware Alpaca bars')
+        df.index=pd.MultiIndex.from_arrays([df.index.get_level_values('symbol'),ts.tz_convert('UTC')],names=['symbol','timestamp'])
+        df=df.loc[df.index.get_level_values('timestamp')+timedelta(hours=1)<=end]
+        if df.empty:return pd.DataFrame(),pd.DataFrame()
 
         # Split point: test = last test_days, train = everything before
         latest_ts = df.index.get_level_values('timestamp').max()
@@ -235,13 +242,7 @@ class DataIngestor:
         train_mask = df.index.get_level_values('timestamp') <= split_ts
         test_mask = df.index.get_level_values('timestamp') > split_ts
 
-        train_df = df.loc[train_mask].copy()
-        test_df = df.loc[test_mask].copy()
-
-        # Enrich with advanced indicators so strategies see RSI/ATR/ADX/EMA features.
-        if not train_df.empty:
-            train_df = _add_indicators(train_df)
-        if not test_df.empty:
-            test_df = _add_indicators(test_df)
-
-        return train_df, test_df
+        from hourly_features import enrich
+        frame = enrich(df.loc[df.index.get_level_values('timestamp') + timedelta(hours=1) <= end])
+        ts = frame.index.get_level_values('timestamp')
+        return frame.loc[ts <= split_ts], frame.loc[ts > split_ts]

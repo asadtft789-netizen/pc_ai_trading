@@ -107,6 +107,8 @@ class MemoryManager:
 
             # --- Migrations for databases created before direction_right existed ---
             cols = {row[1] for row in conn.execute("PRAGMA table_info(trades)").fetchall()}
+            if "closed_at" not in cols:
+                conn.execute("ALTER TABLE trades ADD COLUMN closed_at TEXT")
             if "direction_right" not in cols:
                 conn.execute("ALTER TABLE trades ADD COLUMN direction_right INTEGER")
 
@@ -190,23 +192,14 @@ class MemoryManager:
             return [dict(row) for row in rows]
 
     def close_trade_for_symbol(self, symbol: str, exit_price: float, pnl: float) -> None:
-        with self._get_connection() as conn:
-            row = conn.execute(
-                "SELECT id FROM trades WHERE symbol = ? AND status = 'open' ORDER BY created_at DESC LIMIT 1",
-                (symbol,),
-            ).fetchone()
-            if row:
-                conn.execute(
-                    "UPDATE trades SET exit_price = ?, pnl = ?, status = 'filled' WHERE id = ?",
-                    (exit_price, pnl, row['id']),
-                )
+        raise ValueError('Symbol-wide accounting is disabled. A confirmed exit fill and lot ID are required.')
 
-    def close_trade_by_order_id(self, order_id: str, exit_price: float, pnl: float) -> None:
+    def close_trade_by_order_id(self, order_id: str, exit_price: float, pnl: float, *, closed_at: str) -> None:
+        """Legacy adapter only; operational partial fills use paper_store, not this table."""
+        from paper_store import stamp, amt
+        amt(exit_price, True)
         with self._get_connection() as conn:
-            conn.execute(
-                "UPDATE trades SET exit_price = ?, pnl = ?, status = 'filled' WHERE id = ?",
-                (exit_price, pnl, order_id),
-            )
+            conn.execute("UPDATE trades SET exit_price=?, pnl=?, closed_at=?, status='filled' WHERE id=? AND status='open'",(exit_price,pnl,stamp(closed_at),order_id))
 
     def get_open_trades(self) -> List[Dict[str, Any]]:
         with self._get_connection() as conn:
@@ -223,12 +216,12 @@ class MemoryManager:
                 row = conn.execute(
                     "SELECT COALESCE(SUM(pnl), 0) FROM trades "
                     "WHERE status = 'filled' AND pnl IS NOT NULL "
-                    "AND date(created_at) = date(?)",
+                    "AND date(closed_at) = date(?)",
                     (today,),
                 ).fetchone()
             return float(row[0]) if row else 0.0
-        except Exception:
-            return 0.0
+        except sqlite3.Error as error:
+            raise RuntimeError("Daily realized PnL unavailable") from error
 
     def get_trades_for_strategy(self, strategy_id: str, limit: int = 50) -> List[Dict[str, Any]]:
         with self._get_connection() as conn:
@@ -246,8 +239,10 @@ class MemoryManager:
             ).fetchall()
             return [dict(row) for row in rows]
 
-    def log_trade_open(self, order_id: str, strategy_id: str, symbol: str, qty: float, side: str, regime_id: Optional[int] = None, entry_price: Optional[float] = None) -> None:
-        now_iso = datetime.now(timezone.utc).isoformat()
+    def log_trade_open(self, order_id: str, strategy_id: str, symbol: str, qty: float, side: str, regime_id: Optional[int] = None, entry_price: Optional[float] = None, filled_at: Optional[str] = None) -> None:
+        from paper_store import amt, stamp
+        if not filled_at: raise ValueError('broker fill timestamp required')
+        amt(entry_price,True);now_iso=stamp(filled_at)
         self.log_trade(
             order_id, strategy_id, symbol, qty, side, "open", regime_id,
             entry_price=entry_price,

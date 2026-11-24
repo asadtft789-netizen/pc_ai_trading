@@ -1,0 +1,51 @@
+# Hourly paper learning loop
+
+**Status: runnable offline; not wired into your daemon or Alpaca.** This package adds a research engine, not a competing trading daemon. It never submits orders, changes `PAPER_ENTRIES_ENABLED`, sets an entry gate, or edits your existing champion. The example runs without network access, API keys, pandas, or a scheduler. Python 3.10+ syntax; all standalone dependencies are in the standard library.
+
+## Run it first (Windows PowerShell)
+
+Extract the ZIP into a **new folder**, open PowerShell there, and run:
+
+```powershell
+py -3 -m unittest -v test_learning_loop
+py -3 example_hourly_run.py
+```
+
+Expected: **27 tests pass**; the synthetic month reports six symbols, 25 distinct differing portfolio episodes, `trial: staged`, and the final example entry condition `(breakout) and volume`. The example's candidate activates in the **research database only**. All five external approval checks in this demonstration are **test doubles**. The first-day prices/features produce the discovery outcomes; no seeded P&L is supplied to the running example. The synthetic month was deliberately designed to exercise promotion. Its profits, number of opportunities and pass are not evidence about real markets. A genuine month may finish with no promotion.
+
+To keep the journal instead of deleting the temporary database:
+
+```powershell
+py -3 example_hourly_run.py --output .\example-hourly.sqlite
+```
+
+The example refuses to overwrite an existing file. Do not pass your daemon database. For a read-only inventory of local signatures and schema **names**, run from the extracted folder:
+
+```powershell
+py -3 learning_loop_adapter.py --inspect 'C:\hourly-paper-review'
+```
+
+Optionally add `--db` followed by the path to your existing SQLite file. The inspector reads syntax, table names and columns, not secret values or account rows. A successful inventory is **not** a compatibility sign-off.
+
+## What the two modules do
+
+- **`learning_loop.py`** stores rule versions, evidence, current summaries, frozen trials, modeled fills and equity paths in its own SQLite file. The original, prior versions, evidence, experiments and rollback history remain available. Mutations may revise a signal rule or add a new rule ID. They cannot change `SPREAD` or `EXIT`. A generated signal uses precisely the 12 reported features. The module checks all 4,096 possible feature combinations to reject behaviorally identical candidates.
+- **`learning_loop_adapter.py`** accepts one completed hourly batch for the whole universe, deduplicates replayed batches, and drives the research lifecycle. The execution supervisor is deliberately *not* invoked by the hourly learner. The optional `host_backtest()` helper calls the reported `validate_source`, `enrich`, `signals` and `Backtester.run(None, frame)` interfaces, but could not be exercised without your files. `verify_mapping()` checks that the proposed rule map matches the incumbent's signal; rule ownership must also be verified against its stored IDs.
+- **Discovery:** completed shadow sessions yield distinct flat-to-flat portfolio observations. For a selected learnable rule (default `ENTRY`), the learner looks for a missing feature in at least three non-overlapping losses, an overall loss in the feature-absent sample, and at least one winning feature-present observation. It proposes one feature filter for a later prospective test; it does not conclude that the missing feature caused the loss. `add_rule=True` proposes a new `FILTER_*` rule instead of revising `ENTRY`. Verified broker-paper outcomes can be supplied through `observe()` with `origin='broker_paper'`; they are not mixed with simulated discovery observations. This learner is a bounded feature search, not an unrestricted code-writing language model.
+- **Validation:** five later, predeclared sessions, first two versus last three; two paired portfolios at 1 bp extra slippage per side and two at 2 bp, all including configured fees. Concurrent symbol exposures and overlapping fills are one portfolio episode, not independent samples. There must be 20 different, non-overlapping episodes, positive net improvement in each block, no worse marked drawdown, positive full-window stress advantage, and all host gates. The 20-trade check is separate. Unknown spread/safety evidence, missing bars, insufficient samples, or unverified execution parity cannot promote anything.
+- **Promotion and rollback:** a passing result is staged. Only the next session's opening minute may advance the sidecar rule pointer; the transaction verifies the parent still matches. Rollback restores only that affected pointer (or removes a newly added rule) and keeps the halt in place. If attribution is unknown, it halts without guessing what to roll back. The last five sessions are reserved for a frozen comparison. `daily_report()` distinguishes sampled observations from account P&L; `holdout()` never invents a broker statement.
+
+## Connecting your real hourly daemon: what is still required
+
+**Do not turn on automatic daemon promotion from this package alone.** Your description gives signatures and table names, not the actual transaction or the implementation of the risk gates. A new validator called *after* `research.review()` could be too late: the old champion might already have been replaced. An external sidecar and the daemon database also do not become one atomic transaction merely because both use SQLite.
+
+1. **Inspect first.** Supply the actual `main.py`, `research.py`, `executor.py`, `paper_store.py`, `backtester.py`, `strategy_worker.py`, `hourly_features.py` and a **redacted** `config.py` (or its settings types/defaults). No `.env`, API keys, account records, or production database are needed. The schema-creation code is enough to start. If files are too large, first send `main.py`, `research.py` and `paper_store.py` to locate the promotion path.
+2. **Initialize the real experiment, not the example.** Use a new sidecar and `Ledger.setup(start_date, sessions, symbols, risk, actual_champion_book)` before the first session. Use the actual universe, cash/quantity rules, settings, and the host's exchange calendar for the whole calendar month. The date interval is inclusive at the start and exclusive one calendar month later in exchange dates. `Session.opened` and `Session.cuts` are UTC epoch seconds, with a final cut at the actual close, including any shortened session. The last short slot is for marks/exits, not entries. Do not use the example weekday calendar or the fixture champion as a real default. If the incumbent cannot be unambiguously decomposed into named conditions, leave it unchanged.
+3. **Map observations.** On each *finalized* portfolio cutoff, supply all configured symbols to `close_tick(ledger, cutoff, batch)`. Each `Bar` contains that slot's OHLC; the 12 feature bits and stop distance known at its **close**; plus the entry veto and notional cap known at its **open**. Never reuse a later quote or a later account snapshot to create an earlier gate. Use `None`, not `True`, for unverified gate evidence. A batch more than 120 seconds late is retained but excluded from prospective validation; this receipt rule is independent of the executor's 30-second snapshot rule. Preserve the separate faster executor cadence.
+4. **Verify execution parity before passing a trial.** The supplied reference replay uses shared fractional cash, deterministic symbol priority, prior-bar signals at next open, adverse slippage, configured fees, a conservative stop on a bar low, and EOD liquidation. It samples equity at opens/closes; it cannot resolve arbitrary intrabar price paths, reconstruct the spread, or prove that a stop was honored live. It is not a verified copy of your daemon. Starting balances/peaks and entry caps for each shadow branch must reflect the intended experiment and guard model; do not treat a broker snapshot from one branch as proof of the other's account state. A real parity test or a project-specific replay adapter is required. Leave `model_parity` and `safety_attested` unknown until verified. The demo's gate dictionary must never be copied into operational wiring.
+5. **Connect the actual research and supervision transaction.** Keep exactly one `research.review()` and one existing `sync_positions()` per respective tick. Integrate the learner veto *inside the actual pre-promotion path*, not as a second promoter. In the verified transaction, check the exact incumbent and transfer only the affected rule link, update the corresponding strategy version, and append the real `strategies/trials/rules/lessons/reflections` records using the actual schema. Keep the broker's existing `intents` and `fills` entirely separate. Preserve executor ownership of the entry gate and protective exits. No fabricated hook or daemon-table writes are included in this package. If the original review cannot accept a pre-commit veto, stay observation-only until a small reviewed patch is made.
+6. **Run boundaries.** New package environment variables: **none**. Do not change any existing paper-entry permissions to install this. On session open, `session_open(ledger)` may advance only the sidecar pointer. On a confirmed violation, the actual supervisor must halt new entries first, continue protecting positions, then notify `hard_boundary_violation(ledger, reason, affected_trial)`. Never wait for the next hour to process fills or stop orders. At month end, leave new entries disabled for this experiment, reconcile broker-reported orders/positions using the existing app, and report actual account P&L separately from `holdout()`.
+
+## What was verified
+
+The included tests ran on synthetic hourly data and temporary SQLite files. They cover one-rule changes and additions, no-op/guard edits, split and stress costs, flat and overlapping branches, 31-second stale-snapshot **diagnostics**, incomplete/duplicate hours, restart behavior, missing sessions, next-session activation, stale parents, holdout restrictions, and targeted rollback. They do **not** certify your actual executor's freshness check, the installed Alpaca feed, your Windows service, the real backtester parity or your daemon's promotion transaction. No real paper or live account was accessed.

@@ -45,14 +45,14 @@ function fmtDate(ts) {
 }
 
 function money(v) {
-  if (v == null || v === undefined || Number.isNaN(v)) return "$0.00";
+  if (v == null || v === undefined || Number.isNaN(v)) return "—";
   const sign = v < 0 ? "-" : "";
   return sign + "$" + Math.abs(v).toFixed(2);
 }
 
 function pct(v) {
-  if (v == null || v === undefined || Number.isNaN(v)) return "0.0%";
-  return v.toFixed(1) + "%";
+  if (v == null || v === undefined || Number.isNaN(v)) return "—";
+  return (100*v).toFixed(1) + "%";
 }
 
 function pnlClass(v) {
@@ -67,10 +67,10 @@ function pnlClass(v) {
 async function fetchJson(path) {
   try {
     const res = await fetch(path);
-    if (!res.ok) return null;
+    if (!res.ok) throw Error();
     return await res.json();
   } catch (e) {
-    return null;
+    throw Error("Database unavailable");
   }
 }
 
@@ -82,15 +82,17 @@ async function loadMetrics() {
   if (!data) return;
 
   document.getElementById("kpiTotalTrades").textContent = data.total_trades ?? 0;
-  document.getElementById("kpiWinRate").textContent = pct(data.win_rate ?? 0);
+  document.getElementById("kpiWinRate").textContent = pct(data.win_rate);
   document.getElementById("kpiWinTrades").textContent = data.win_trades ?? 0;
   document.getElementById("kpiLossTrades").textContent = data.loss_trades ?? 0;
-  document.getElementById("kpiTotalPnL").textContent = money(data.total_pnl ?? 0);
-  document.getElementById("kpiDailyPnL").textContent = money(data.daily_pnl ?? 0);
+  document.getElementById("kpiTotalPnL").textContent = money(data.total_pnl);
+  document.getElementById("kpiDailyPnL").textContent = money(data.daily_pnl);
 
   document.getElementById("accCorrect").textContent = data.correct_observations ?? 0;
   document.getElementById("accWrong").textContent = data.wrong_observations ?? 0;
 
+  const age=data.broker_sync?(Date.now()-Date.parse(data.broker_sync))/1000:Infinity;
+  document.getElementById('syncState').textContent=`Broker: ${age>45?'stale / unknown':data.snapshot} · last confirmed sync ${data.broker_sync||'never'} · last new research bar processed ${data.research||'never'}`;
   const el = document.getElementById("modeBadge");
   const modeVal = document.getElementById("modeValue");
   if (data.mode === "PAPER") {
@@ -258,9 +260,9 @@ async function loadEquityChart() {
 }
 
 async function loadPriceChart() {
-  const data = await fetchJson("/api/price-chart/BTC/USD");
-  if (!data || data.length === 0) return;
-
+  const selector=document.getElementById('chartSymbol');const symbols=await fetchJson('/api/symbols');const old=selector.value;selector.replaceChildren(...symbols.map(s=>new Option(s,s)));if(symbols.includes(old))selector.value=old;
+  const symbol=selector.value;const data=symbol?await fetchJson('/api/price-chart/'+symbol.split('/').map(encodeURIComponent).join('/')):[];if(selector.value!==symbol)return;
+  if (!data.length){Plotly.purge('priceChart');document.getElementById('priceChart').textContent='No completed market bars.';return;}
   const xs = data.map((d) => d.t);
   const opens = data.map((d) => d.o);
   const highs = data.map((d) => d.h);
@@ -278,6 +280,7 @@ async function loadPriceChart() {
       increasing: { line: { color: "#22c55e" } },
       decreasing: { line: { color: "#ef4444" } },
     },
+    ...[1,0].map(target=>({type:'scatter',mode:'markers',name:target?'Long target':'Flat target',x:data.filter(r=>r.signal===target).map(r=>r.t),y:data.filter(r=>r.signal===target).map(r=>r.c),marker:{symbol:target?'triangle-up':'triangle-down',size:7,color:target?'#58dfb5':'#eda486'}})),
   ], {
     template: "plotly_dark",
     paper_bgcolor: "rgba(0,0,0,0)",
@@ -294,6 +297,7 @@ async function loadPriceChart() {
 // ---------------------------------------------------------------------------
 async function refresh() {
   await Promise.all([
+    fetchJson('/api/hourly').then(data=>{const body=document.getElementById('hourlyRows');body.replaceChildren();for(const r of data){const tr=document.createElement('tr');for(const v of [r.h,r.total_trades,`${r.wins} / ${r.losses}`,pct(r.win_rate),pct(r.observation_accuracy),r.lessons,money(r.gross),money(r.real_profit_sim)]){const td=document.createElement('td');td.textContent=v;tr.appendChild(td);}body.appendChild(tr);}}),
     loadMetrics(),
     loadRegime(),
     loadStrategy(),
@@ -311,8 +315,8 @@ async function refresh() {
 }
 
 function startPolling() {
-  refresh();
-  setInterval(refresh, POLL_INTERVAL);
+  async function poll(){try{await refresh();}catch{document.getElementById('syncState').textContent='Update failed — displayed values are stale.';}finally{setTimeout(poll,POLL_INTERVAL);}}poll();
+  document.getElementById('chartSymbol').onchange=()=>loadPriceChart().catch(()=>{document.getElementById('priceChart').textContent='Price data unavailable';});
 }
 
 // ---------------------------------------------------------------------------

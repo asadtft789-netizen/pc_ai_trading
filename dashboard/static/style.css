@@ -271,3 +271,5 @@ body {
   .two-col { grid-template-columns: 1fr; }
   .charts-row { grid-template-columns: 1fr; }
 }
+
+#syncState{color:var(--text-muted);font:12px monospace;margin-bottom:12px;overflow-wrap:anywhere}select{color:var(--text);background:var(--bg-raised);padding:4px} .panel p{font-size:13px;color:var(--text-muted);margin:8px 0}.sidebar a:focus-visible,select:focus-visible{outline:2px solid currentColor}@media(max-width:900px){.shell .sidebar{display:block;position:static;width:auto;height:auto;padding:12px}.sidebar .nav{display:flex;flex-direction:row;flex-wrap:wrap}.sidebar .divider,.sidebar .brand-mark{display:none}.table-wrap{overflow:auto}}

@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Self-Evolving Trading AI — Dashboard</title>
 <link rel="stylesheet" href="/static/style.css">
-<script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+<script src="/assets/plotly.js"></script>
 </head>
 <body>
 
@@ -35,9 +35,9 @@
 
   <!-- Main content -->
   <main class="main">
-    <header class="app-header">
+    <header class="app-header"><div role="status" id="syncState">Waiting for database</div>
       <h1>Trading AI Dashboard</h1>
-      <p class="subtitle">Autonomous swing-trading agent — live metrics, charts, and lessons</p>
+      <p class="subtitle">Dedicated paper account · confirmed gross realized PnL, before fees</p>
     </header>
 
     <!-- Overview page -->
@@ -46,27 +46,27 @@
       <div class="kpi-grid">
         <div class="kpi-card">
           <div class="kpi-label">Total Trades</div>
-          <div class="kpi-value" id="kpiTotalTrades">0</div>
+          <div class="kpi-value" id="kpiTotalTrades">—</div>
         </div>
         <div class="kpi-card">
           <div class="kpi-label">Win Rate</div>
-          <div class="kpi-value" id="kpiWinRate">0.0%</div>
+          <div class="kpi-value" id="kpiWinRate">—</div>
         </div>
         <div class="kpi-card">
           <div class="kpi-label">Win Trades</div>
-          <div class="kpi-value" id="kpiWinTrades">0</div>
+          <div class="kpi-value" id="kpiWinTrades">—</div>
         </div>
         <div class="kpi-card">
           <div class="kpi-label">Loss Trades</div>
-          <div class="kpi-value" id="kpiLossTrades">0</div>
+          <div class="kpi-value" id="kpiLossTrades">—</div>
         </div>
         <div class="kpi-card">
           <div class="kpi-label">Total PnL</div>
-          <div class="kpi-value" id="kpiTotalPnL">$0.00</div>
+          <div class="kpi-value" id="kpiTotalPnL">—</div>
         </div>
         <div class="kpi-card">
           <div class="kpi-label">Daily PnL</div>
-          <div class="kpi-value" id="kpiDailyPnL">$0.00</div>
+          <div class="kpi-value" id="kpiDailyPnL">—</div>
         </div>
       </div>
 
@@ -88,11 +88,11 @@
       <!-- Charts row -->
       <div class="charts-row">
         <div class="panel chart-panel">
-          <div class="panel-title">Equity Curve (Cumulative PnL)</div>
+          <div class="panel-title">Cumulative confirmed gross PnL</div>
           <div id="equityChart" style="width:100%;height:320px;"></div>
         </div>
         <div class="panel chart-panel">
-          <div class="panel-title">Price Chart — BTC/USD</div>
+          <div class="panel-title">Completed hourly bars · <label>Symbol <select id="chartSymbol"></select></label></div>
           <div id="priceChart" style="width:100%;height:320px;"></div>
         </div>
       </div>
@@ -114,6 +114,7 @@
         </div>
       </div>
 
+      <section class="panel full-width"><h2>Hourly results · UTC</h2><p>Counts use completed lots. Gross PnL includes partial exits. Scenario deducts 10 basis points on each side at the paper execution prices; it is not live profit.</p><div class="table-wrap"><table class="data-table"><thead><tr><th>UTC hour</th><th>Closed</th><th>Wins / losses</th><th>Win rate</th><th>Direction accuracy</th><th>Lessons</th><th>Gross PnL</th><th>Cost scenario</th></tr></thead><tbody id="hourlyRows"></tbody></table></div></section>
       <!-- Recent trades -->
       <div class="panel full-width">
         <div class="panel-header">

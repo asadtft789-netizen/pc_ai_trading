@@ -17,10 +17,10 @@ def _getenv(key: str, default: str) -> str:
 
 
 def _getenv_float(key: str, default: float) -> float:
-    try:
-        return float(_getenv(key, str(default)))
-    except ValueError:
-        return default
+    import math
+    v=float(_getenv(key,str(default)))
+    if not math.isfinite(v) or v<0:raise ValueError(f'Invalid numeric setting: {key}')
+    return v
 
 
 def _getenv_int(key: str, default: int) -> int:
@@ -43,7 +43,7 @@ class AlpacaConfig:
 
     @property
     def is_paper(self) -> bool:
-        return "paper" in self.base_url
+        return self.base_url.rstrip("/") == "https://paper-api.alpaca.markets"
 
 
 @dataclass(frozen=True)

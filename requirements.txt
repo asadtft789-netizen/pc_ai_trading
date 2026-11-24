@@ -1,19 +1,7 @@
-# Core dependencies for the self-evolving trader daemon
-alpaca-py>=0.45.0
-pandas>=2.0.0
-numpy>=1.24.0
-python-dateutil>=2.8.0
-PyYAML>=6.0
-tenacity>=8.2.0
-
-# Optional LLM provider for strategy invention (OpenAI-compatible).
-# Without this, the daemon falls back to the built-in strategy.
-openai>=1.0.0
-
-# python-dotenv loads .env files
-python-dotenv>=1.0.0
-
-# Web dashboard (FastAPI + uvicorn)
-fastapi>=0.100.0
-uvicorn>=0.23.0
-python-multipart>=0.0.6
+alpaca-py==0.45.0
+pandas>=2.2,<3
+numpy>=1.24,<3
+python-dotenv>=1,<2
+fastapi>=0.110,<1
+uvicorn>=0.23,<1
+plotly>=5.24,<7
