@@ -86,6 +86,21 @@ class StrategyExecutor:
         self.path = path
         self.b = broker
         self.s = settings
+        self._entry_quote_cache = {}  # symbol -> (bid, ask, ts, fetch_time)
+
+    def _entry_quote(self, symbol):
+        """Cache quotes for 30 seconds for entry decisions only (latency optimization)."""
+        now_ts = datetime.now(timezone.utc)
+        cached = self._entry_quote_cache.get(symbol)
+        if cached:
+            bid, ask, qts, fetch_ts = cached
+            if (now_ts - fetch_ts).total_seconds() <= 30:
+                return bid, ask, qts
+        quote = self.b.quote(symbol)
+        if quote:
+            bid, ask, qts = quote
+            self._entry_quote_cache[symbol] = (bid, ask, qts, now_ts)
+        return quote
 
     def reconcile_trades(self, open_trades=None, latest_prices=None):
         try:
@@ -192,19 +207,21 @@ class StrategyExecutor:
         lots, ok = self.reconcile_trades()
         if not ok:
             return 'unknown: no order'
+        now_iso = now()[:16]
         with db(self.path) as c:
             decisions = {r['symbol']: dict(r) for r in c.execute('select d.* from decisions d join watermarks w on w.symbol=d.symbol and w.t=d.t')}
             champ = c.execute("select id from strategies where status='champion'").fetchone()
             equity = D(get(c, 'equity'))
             peak = D(get(c, 'peak'))
             bp = D(get(c, 'buying_power'))
-            daily = D(str(c.execute('select coalesce(sum(gross),0) from outcomes where substr(at,1,10)=?', (now()[:10],)).fetchone()[0]))
+            daily = D(str(c.execute('select coalesce(sum(gross),0) from outcomes where substr(at,1,10)=?', (now_iso[:10],)).fetchone()[0]))
             recent = [r[0] for r in c.execute('select sum(gross) from outcomes join lots l on l.id=outcomes.lot where cast(l.qty as real)=0 group by lot order by max(at) desc limit 100')]
             gate = get(c, 'entry_gate')
+            regimes = {r['symbol']: r['regime'] for r in c.execute('select symbol, regime from decisions')}
             history = [D(str(r[0])) for r in c.execute('select gross-0.001*(entry+exit)*cast(qty as real) from outcomes order by at,id')]
-            day_net = D(str(c.execute('select coalesce(sum(gross-0.001*(entry+exit)*cast(qty as real)),0) from outcomes where substr(at,1,10)=?', (now()[:10],)).fetchone()[0]))
+            day_net = D(str(c.execute('select coalesce(sum(gross-0.001*(entry+exit)*cast(qty as real)),0) from outcomes where substr(at,1,10)=?', (now_iso[:10],)).fetchone()[0]))
         for lot in lots:
-            quote = self.b.quote(lot['symbol'])
+            quote = self.b.quote(lot['symbol'])  # exits always use fresh quotes
             if not fresh(quote):
                 continue
             bid, ask, _ = quote
@@ -213,17 +230,26 @@ class StrategyExecutor:
             d = decisions.get(lot['symbol'])
             flat = d and d['strategy'] and (age(d['t']) < 4200) and (d['target'] == 0)
             if bid <= basis - gap or bid >= basis + 2 * gap or age(lot['opened']) >= 604800 or flat:
-                return 'exit submitted' if self._close_position(lot, now()[:16]) else 'exit pending or blocked'
+                return 'exit submitted' if self._close_position(lot, now_iso) else 'exit pending or blocked'
         peak_alloc = allocated = amt(self.s.risk.max_capital_usd, True)
         for value in history:
             allocated += value
             peak_alloc = max(peak_alloc, allocated)
-        if lots or not champ or gate != champ[0] or (allocated <= peak_alloc * D('.90')) or (os.getenv('PAPER_ENTRIES_ENABLED') != 'YES') or (equity <= peak * D('.90')) or (min(daily, day_net) <= -amt(self.s.risk.max_daily_loss_usd, True)):
+        if lots or not champ or (allocated <= peak_alloc * D('.90')) or (os.getenv('PAPER_ENTRIES_ENABLED') != 'YES') or (equity <= peak * D('.90')) or (min(daily, day_net) <= -amt(self.s.risk.max_daily_loss_usd, True)):
             return 'entries paused or exposure held'
         for d in decisions.values():
-            if not d['target'] or d['strategy'] != champ[0] or (not 3600 <= age(d['t']) <= 4200) or ('/' in d['symbol']):
+            if not d['target'] or (not 3600 <= age(d['t']) <= 4200) or ('/' in d['symbol']):
                 continue
-            quote = self.b.quote(d['symbol'])
+            regime = regimes.get(d['symbol'])
+            regime_gate = None
+            if regime:
+                with db(self.path) as c2:
+                    regime_gate = get(c2, f'entry_gate_{regime}')
+            if regime_gate is None:
+                regime_gate = gate  # fallback to global gate for backward compatibility
+            if regime_gate != d['strategy']:
+                continue
+            quote = self._entry_quote(d['symbol'])
             if not fresh(quote) or not d['atr']:
                 continue
             bid, ask, _ = quote
@@ -242,7 +268,7 @@ class StrategyExecutor:
             size = min(cap * fraction / gap * ask, cap, bp, amt(self.s.risk.max_order_size_usd, True), amt(self.s.risk.max_position_usd, True))
             qty = (size / ask).quantize(D('.000000001'), rounding=ROUND_DOWN)
             if qty > 0 and qty * ask >= amt(self.s.risk.min_order_size_usd, True) and (gap < bid):
-                return 'entry submitted' if self._open_position(d['symbol'], qty, champ[0], gap, d['t']) else 'entry pending or blocked'
+                return 'entry submitted' if self._open_position(d['symbol'], qty, d['strategy'], gap, d['t']) else 'entry pending or blocked'
         return 'no new order'
 
 def age(ts):
