@@ -10,6 +10,7 @@ from executor import PAPER
 from learning_loop import Bar as LLBar, Ledger, Risk, Session, mask, FEATURES as LL_FEATURES, Rule
 from learning_loop_adapter import close_tick, session_open, UNKNOWN_GATES
 from hourly_features import enrich
+from research import REGIMES
 ROOT = Path(__file__).resolve().parent
 
 LEARNING_DB = str(ROOT / 'data' / 'learning_loop.sqlite')
@@ -200,10 +201,15 @@ def main():
         def tick():
             learn_from_closes(path, mut)
             train, test = ingest.get_train_test_split()
-            res = review(path, s, train, test, ingest.detect_regime(test), mut)
+            results = []
+            for rl in REGIMES:
+                rg = dict(ingest.detect_regime(test))
+                rg['label'] = rl
+                res = review(path, s, train, test, rg, mut)
+                results.append(res)
             drift(path)
             _observe_new_bars(path, s)
-            return res
+            return results
     else:
         from executor import StrategyExecutor, AlpacaPaper
         adapter = StrategyExecutor(path, AlpacaPaper(s), s)
@@ -216,7 +222,9 @@ def main():
                 put(c, args.role + '_heartbeat', now())
         except Exception as e:
             if args.role=='research':
-                with db(path,True) as c:put(c,'entry_gate','closed')
+                with db(path,True) as c:
+                    for rl in REGIMES:
+                        put(c, f'entry_gate_{rl}', 'closed')
             log.error('%s unavailable (%s); no automatic replay of submissions', args.role, type(e).__name__)
             if args.once:
                 raise SystemExit(1)
