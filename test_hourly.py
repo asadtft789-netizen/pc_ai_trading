@@ -79,7 +79,7 @@ class Hourly(unittest.TestCase):
         self.assertTrue(self.e.reconcile_trades()[1])
         with db(self.p, True) as c:
             put(c, 'entry_gate', 's')
-            c.execute('insert into strategies values(?,?,?,?,?,?,?,?)', ('s', 'fixture', SEED, '["trend","r"]', None, 1, 'champion', now()))
+            c.execute('insert into strategies values(?,?,?,?,?,?,?,?,?)', ('s', 'fixture', SEED, '["trend","r"]', None, 1, 'champion', None, now()))
         return self.e._open_position('TEST', '1', 's', '2', now())
 
     def test_confirmed_partial_across_midnight_and_restart(self):
@@ -170,7 +170,7 @@ class Hourly(unittest.TestCase):
     def test_review_idempotence_and_no_orders(self):
         f = enrich(bars())
         args = (self.p, self.s, f.iloc[:280], f.iloc[280:], dict(label='sideways_quiet', indicators={}), self.mut)
-        self.assertEqual(review(*args), 'hour recorded')
+        self.assertEqual(review(*args), 'hour recorded [sideways_quiet]')
         self.assertEqual(review(*args), 'no new completed bar')
         self.assertEqual(self.mut.generate_new_strategy.call_count, 1)
         self.assertEqual(len(read_view('price', 'TEST', self.p)), 300)
@@ -209,7 +209,7 @@ class Hourly(unittest.TestCase):
         bar = (datetime.now(timezone.utc) - timedelta(hours=1, minutes=1)).isoformat()
         with db(self.p, True) as c:
             put(c, 'entry_gate', 's')
-            c.execute('insert into strategies values(?,?,?,?,?,?,?,?)', ('s', 'fixture', SEED, '["trend","r"]', None, 1, 'champion', bar))
+            c.execute('insert into strategies values(?,?,?,?,?,?,?,?,?)', ('s', 'fixture', SEED, '["trend","r"]', None, 1, 'champion', None, bar))
             c.execute('insert into decisions values(?,?,?,?,?,?)', ('TEST', bar, 's', 1, 1, 'bull_quiet'))
             c.execute('insert into watermarks values(?,?)', ('TEST', bar))
         with patch.dict(os.environ, {'PAPER_ENTRIES_ENABLED': 'YES'}):

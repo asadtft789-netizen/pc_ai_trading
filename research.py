@@ -45,7 +45,7 @@ def paired_lower(a, b):
     return float(np.quantile(v[idx.reshape(500, -1)[:, :n]].mean(axis=1), 0.1))
 
 
-def evaluate(source, guard, frame):
+def evaluate(source, guard, frame, settings):
     """Run backtester on a source/guard combination over a frame."""
     sig = signals(source, frame)
     frame = frame.loc[~frame.index.get_level_values('symbol').str.contains('/', regex=False)]
@@ -53,7 +53,7 @@ def evaluate(source, guard, frame):
         sig = sig.loc[frame.index] & frame[guard].astype(int)
     else:
         sig = sig.loc[frame.index]
-    return Backtester(None).run(None, frame.assign(signal=sig))
+    return Backtester(settings).run(None, frame.assign(signal=sig))
 
 
 def get_champion_for_regime(c, regime_label):
@@ -135,16 +135,16 @@ def review(path, s, train, test, regime, mutator):
         days = future.index.get_level_values('timestamp').normalize().unique()
         guard = json.loads(child['rule_ids'])[0]
         if len(days) >= 15:
-            trial = evaluate(child['source'], guard, future)
-            ablate = evaluate(child['source'], None, future)
-            control = evaluate(champ['source'], json.loads(champ['rule_ids'])[0], future) if champ else bt._empty_metrics('cash')
+            trial = evaluate(child['source'], guard, future, s)
+            ablate = evaluate(child['source'], None, future, s)
+            control = evaluate(champ['source'], json.loads(champ['rule_ids'])[0], future, s) if champ else bt._empty_metrics('cash')
             buckets = np.array_split(days.sort_values(), 3)
             paired = []
             for dayslice in buckets:
                 f = future.loc[future.index.get_level_values('timestamp').normalize().isin(dayslice)]
-                m = evaluate(child['source'], guard, f)
-                a = evaluate(child['source'], None, f)
-                inc = evaluate(champ['source'], json.loads(champ['rule_ids'])[0], f) if champ else bt._empty_metrics('cash')
+                m = evaluate(child['source'], guard, f, s)
+                a = evaluate(child['source'], None, f, s)
+                inc = evaluate(champ['source'], json.loads(champ['rule_ids'])[0], f, s) if champ else bt._empty_metrics('cash')
                 paired.append((m['total_trades'] >= 3, m['pnl'] - a['pnl'], m['pnl'] - max(0, inc['pnl'])))
             enough = all((x[0] for x in paired)) and trial['total_trades'] >= 20
             lower = paired_lower(trial, ablate)
@@ -161,8 +161,10 @@ def review(path, s, train, test, regime, mutator):
             except Exception:
                 halted = True
 
-            # Phoenix promotion requires statistical superiority over incumbent
-            beats_incumbent = all((x[2] > 0 for x in paired)) and trial['max_drawdown'] >= control['max_drawdown']
+            # Phoenix promotion requires statistical superiority over incumbent;
+            # with no incumbent yet, the incumbent-comparison is vacuously true.
+            beats_incumbent = (not champ) or (
+                all((x[2] > 0 for x in paired)) and trial['max_drawdown'] >= control['max_drawdown'])
             action = ('champion' if passes(trial) and rule_state == 'supported'
                       and beats_incumbent and not halted else 'retired')
             reason = json.dumps(dict(blocks=paired, guard_lower_90=lower, rule=rule_state,
@@ -206,8 +208,8 @@ def review(path, s, train, test, regime, mutator):
             proposal['source'] = champ['source']
 
         if proposal:
-            trial = evaluate(proposal['source'], proposal['guard'], train) if proposal is not None else None
-            hold = evaluate(proposal['source'], proposal['guard'], test) if proposal is not None else None
+            trial = evaluate(proposal['source'], proposal['guard'], train, s) if proposal is not None else None
+            hold = evaluate(proposal['source'], proposal['guard'], test, s) if proposal is not None else None
             action = 'challenger' if proposal and passes(trial) and passes(hold) else 'retired'
 
     incumbent_sig = (
