@@ -117,7 +117,7 @@ def review(path, s, train, test, regime, mutator):
     gate = None
     incumbent_ok = False
     if champ:
-        gate = evaluate(champ['source'], json.loads(champ['rule_ids'])[0], test)
+        gate = evaluate(champ['source'], json.loads(champ['rule_ids'])[0], test, s)
         incumbent_ok = bool(passes(gate))
 
     action = None

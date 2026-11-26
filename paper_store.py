@@ -48,6 +48,14 @@ def init(path):
             if tables:
                 if 'meta' not in tables or c.execute("select v from meta where k='schema'").fetchone() != ('hourly-paper-1',):
                     raise ValueError('use a separate new operational database')
+                cols = {r[1] for r in c.execute("PRAGMA table_info(strategies)")}
+                if 'regime' not in cols:
+                    c.execute("ALTER TABLE strategies ADD COLUMN regime TEXT")
+                    c.execute("DROP INDEX IF EXISTS one_champ")
+                    c.execute("DROP INDEX IF EXISTS one_child")
+                    c.execute("CREATE UNIQUE INDEX IF NOT EXISTS one_champ_per_regime ON strategies(status,regime) WHERE status='champion' AND regime IS NOT NULL")
+                    c.execute("CREATE UNIQUE INDEX IF NOT EXISTS one_champ_global ON strategies(status) WHERE status='champion' AND regime IS NULL")
+                    c.execute("CREATE UNIQUE INDEX IF NOT EXISTS one_child_per_regime ON strategies(status,regime) WHERE status='challenger' AND regime IS NOT NULL")
             else:
                 for sql in SCHEMA.split(';'):
                     if sql.strip():
