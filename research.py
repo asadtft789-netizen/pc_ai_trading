@@ -2,7 +2,7 @@
 Each market regime gets its own champion. Challengers run in Shadow Mode
 until they statistically prove superiority on live bars before promotion.
 """
-import json, math, sqlite3
+import json, math, sqlite3, concurrent.futures
 from datetime import datetime, timezone
 from pathlib import Path
 import numpy as np
@@ -17,6 +17,42 @@ from regime_detector import classify
 
 LEARNING_DB_PATH = Path(__file__).resolve().parent / 'data' / 'learning_loop.sqlite'
 REGIMES = ['trend_up', 'trend_down', 'range_quiet', 'vol_expansion']
+
+FAILURE_PATTERNS = {
+    'counter_trend': {'logic': 'trend == 0', 'guards': ['trend', 'momentum'], 'desc': 'Loss occurred against prevailing EMA trend.'},
+    'low_volume': {'logic': 'volume == 0', 'guards': ['volume'], 'desc': 'Signal lacked relative volume confirmation.'},
+    'overextended': {'logic': 'rsi > 70 or rsi < 30', 'guards': ['golden', 'pullback'], 'desc': 'Entry at RSI extremes without mean reversion.'},
+    'whipsaw': {'logic': 'quiet == 0', 'guards': ['quiet'], 'desc': 'High ATR volatility caused immediate stop-out.'},
+    'resistance_hit': {'logic': 'resistance == 1', 'guards': ['breakout', 'structure'], 'desc': 'Entry into overhead shifted resistance.'},
+    'no_momentum': {'logic': 'momentum == 0', 'guards': ['momentum', 'breakout'], 'desc': 'Signal lacked 5-bar momentum confirmation.'}
+}
+
+
+def analyze_failure(outcome, frame):
+    """Diagnose trade failure by inspecting feature states at entry."""
+    try:
+        symbol = outcome['symbol']
+        entry_t = pd.Timestamp(outcome['at'])
+        # Find the entry bar - the decision bar is usually one bar before the outcome at
+        decision_idx = frame.xs(symbol, level='symbol').index.get_indexer([entry_t], method='pad')[0]
+        if decision_idx < 0: return None
+        bar = frame.xs(symbol, level='symbol').iloc[decision_idx]
+
+        causes = []
+        for name, p in FAILURE_PATTERNS.items():
+            # Evaluate logic string against bar values
+            if eval(p['logic'], {}, bar.to_dict()):
+                causes.append({'id': name, 'desc': p['desc'], 'guards': p['guards']})
+
+        return {
+            'symbol': symbol,
+            'at': entry_t.isoformat(),
+            'pnl': float(outcome['gross']),
+            'causes': causes,
+            'features': {f: bool(bar[f]) for f in FEATURES if f in bar}
+        }
+    except Exception:
+        return None
 
 
 def compact(m):
@@ -177,20 +213,37 @@ def review(path, s, train, test, regime, mutator):
             attributed_lessons=lessons,
             rules=rules,
             previous_test=dict(last_trial) if last_trial else None,
-            regime=regime_label
+            regime=regime_label,
+            failure_analysis=[analyze_failure(e, data) for e in evidence if e['gross'] < 0]
         )
+
+        # Parallel candidate generation
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+            futures = [executor.submit(mutator.propose, evidence_obj) for _ in range(5)]
+            proposals = [f.result() for f in concurrent.futures.as_completed(futures) if isinstance(f.result(), dict)]
+
         repair = bool(champ and any(
             r['state'] == 'review' and r['feature'] == json.loads(champ['rule_ids'])[0]
             for r in rules))
-        proposal = (
-            mutator.generate_rule_correction(evidence_obj) if repair
-            else mutator.generate_new_strategy(evidence_obj)
-        ) or dict(
-            source=champ['source'] if champ else SEED,
-            name=f'Hourly {regime_label} challenger',
-            guard=FEATURES[(serial + 5) % len(FEATURES)],
-            lesson=f'Test one causal guard for {regime_label} regime.'
-        )
+
+        # Select best proposal based on brief backtest
+        proposal = None
+        if proposals:
+            best_trial = None
+            for p in proposals:
+                trial = evaluate(p['source'], p['guard'], train, s)
+                if passes(trial) and (not best_trial or trial['pnl'] > best_trial['pnl']):
+                    best_trial = trial
+                    proposal = p
+
+        if not proposal: # Fallback
+            proposal = dict(
+                source=champ['source'] if champ else SEED,
+                name=f'Hourly {regime_label} challenger',
+                guard=FEATURES[(serial + 5) % len(FEATURES)],
+                lesson=f'Test one causal guard for {regime_label} regime.'
+            )
+
         halted = False
         try:
             led = Ledger(LEARNING_DB_PATH)
@@ -204,8 +257,14 @@ def review(path, s, train, test, regime, mutator):
         elif halted:
             proposal = None
 
-        if repair and proposal is not None:
-            proposal['source'] = champ['source']
+        # Final logic after candidate generation
+        if not proposal and evidence_obj['failure_analysis']:
+            # Record first failure for human review if AI cannot repair
+            f = evidence_obj['failure_analysis'][0]
+            if f:
+                with db(path, True) as c:
+                    from paper_store import record_unsolved_failure
+                    record_unsolved_failure(c, 'unsolved', f['symbol'], regime_label, champ['id'] if champ else 'SEED', f['pnl'], f['causes'][0]['desc'] if f['causes'] else 'unknown', 'AI_mutation_failed')
 
         if proposal:
             trial = evaluate(proposal['source'], proposal['guard'], train, s) if proposal is not None else None

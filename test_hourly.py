@@ -73,7 +73,7 @@ class Hourly(unittest.TestCase):
         self.b = Fake()
         self.e = StrategyExecutor(self.p, self.b, self.s)
         self.mut = Mock()
-        self.mut.generate_new_strategy.return_value = None
+        self.mut.propose.return_value = None
 
     def start(self):
         self.assertTrue(self.e.reconcile_trades()[1])
@@ -172,7 +172,7 @@ class Hourly(unittest.TestCase):
         args = (self.p, self.s, f.iloc[:280], f.iloc[280:], dict(label='sideways_quiet', indicators={}), self.mut)
         self.assertEqual(review(*args), 'hour recorded [sideways_quiet]')
         self.assertEqual(review(*args), 'no new completed bar')
-        self.assertEqual(self.mut.generate_new_strategy.call_count, 1)
+        self.assertEqual(self.mut.propose.call_count, 5)
         self.assertEqual(len(read_view('price', 'TEST', self.p)), 300)
         self.assertEqual(len(self.b.submits), 0)
 
@@ -239,7 +239,7 @@ class Hourly(unittest.TestCase):
         f['low'] = f.open - 1
         f['support'] = i % 4 == 0
         src = SEED.split(':')[0] + ':\n    return 1'
-        self.mut.generate_new_strategy.return_value = dict(name='fixture', source=src, guard='support', lesson='Test the support guard')
+        self.mut.propose.return_value = dict(name='fixture', source=src, guard='support', lesson='Test the support guard')
         reg = dict(label='sideways_quiet', indicators={})
         born = f.index[599][1].isoformat()
         with patch('research.now', return_value=born):
@@ -255,7 +255,7 @@ class Hourly(unittest.TestCase):
     def test_bad_holdout_does_not_promote(self):
         f = enrich(bars(240))
         f['support'] = False
-        self.mut.generate_new_strategy.return_value = dict(name='flat', source=SEED, guard='support', lesson='guard')
+        self.mut.propose.return_value = dict(name='flat', source=SEED, guard='support', lesson='guard')
         review(self.p, self.s, f.iloc[:150], f.iloc[150:], dict(label='unknown', indicators={}), self.mut)
         self.assertEqual(read_view('strategy', path=self.p), {})
 

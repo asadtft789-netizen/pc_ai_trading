@@ -242,8 +242,9 @@ class Ledger:
         CREATE TABLE IF NOT EXISTS ll_bars(cut INTEGER PRIMARY KEY, at INTEGER NOT NULL, body TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS ll_obs(id TEXT PRIMARY KEY, start INTEGER NOT NULL, end INTEGER NOT NULL, rule TEXT NOT NULL, ver TEXT NOT NULL, bits INTEGER NOT NULL, net REAL NOT NULL, origin TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS ll_trials(id TEXT PRIMARY KEY, first TEXT UNIQUE NOT NULL, at INTEGER NOT NULL, state TEXT NOT NULL, frozen TEXT NOT NULL, result TEXT, effective INTEGER);
+        CREATE TABLE IF NOT EXISTS ll_solutions(problem_id TEXT PRIMARY KEY, fix_expression TEXT NOT NULL, confirmed_at INTEGER NOT NULL, description TEXT);
         ''')
-        for table in ('ll_events','ll_rules','ll_bars','ll_obs'):
+        for table in ('ll_events','ll_rules','ll_bars','ll_obs','ll_solutions'):
             for op in ('UPDATE','DELETE'):
                 self.db.execute(f"CREATE TRIGGER IF NOT EXISTS {table}_{op} BEFORE {op} ON {table} BEGIN SELECT RAISE(ABORT,'immutable research history'); END")
 

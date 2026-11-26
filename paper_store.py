@@ -36,7 +36,7 @@ def db(path, write=False):
         c.execute('BEGIN IMMEDIATE' if write else 'BEGIN')
         with c:
             yield c
-SCHEMA = "\nCREATE TABLE meta(k TEXT PRIMARY KEY,v TEXT NOT NULL);\nCREATE TABLE bars(symbol TEXT,t TEXT,o REAL,h REAL,l REAL,c REAL,v REAL,PRIMARY KEY(symbol,t));\nCREATE TABLE decisions(symbol TEXT,t TEXT,strategy TEXT,target INTEGER,atr REAL,regime TEXT,PRIMARY KEY(symbol,t));\nCREATE TABLE watermarks(symbol TEXT PRIMARY KEY,t TEXT NOT NULL);\nCREATE TABLE strategies(id TEXT PRIMARY KEY,name TEXT,source TEXT,rule_ids TEXT,parent_id TEXT,generation INTEGER,status TEXT,regime TEXT,born TEXT);\nCREATE UNIQUE INDEX one_champ_per_regime ON strategies(status,regime) WHERE status='champion' AND regime IS NOT NULL;\nCREATE UNIQUE INDEX one_champ_global ON strategies(status) WHERE status='champion' AND regime IS NULL;\nCREATE UNIQUE INDEX one_child_per_regime ON strategies(status,regime) WHERE status='challenger' AND regime IS NOT NULL;\nCREATE TABLE trials(strategy TEXT,cut TEXT,phase TEXT,metrics TEXT,PRIMARY KEY(strategy,cut,phase));\nCREATE TABLE rules(id TEXT PRIMARY KEY,text TEXT,feature TEXT,state TEXT,created_at TEXT,parent TEXT);\nCREATE TABLE lessons(id TEXT PRIMARY KEY,lot TEXT,rule_id TEXT,lesson TEXT,created_at TEXT);\nCREATE TABLE reflections(id TEXT PRIMARY KEY,subject TEXT,message TEXT,at TEXT);\nCREATE TABLE regimes(t TEXT PRIMARY KEY,label TEXT,indicators TEXT);\nCREATE TABLE intents(id TEXT PRIMARY KEY,lot TEXT,symbol TEXT,strategy TEXT,side TEXT,qty TEXT,stop_gap TEXT,state TEXT,broker TEXT UNIQUE,created TEXT);\nCREATE TABLE fills(id TEXT PRIMARY KEY,intent TEXT NOT NULL REFERENCES intents(id),qty TEXT,price TEXT,at TEXT);\nCREATE TABLE outcomes(id TEXT PRIMARY KEY,lot TEXT,strategy TEXT,symbol TEXT,qty TEXT,entry REAL,exit REAL,gross REAL,at TEXT);\nCREATE TABLE lots(id TEXT PRIMARY KEY,symbol TEXT,strategy TEXT,qty TEXT,basis TEXT,opened TEXT,gap TEXT);\n"
+SCHEMA = "\nCREATE TABLE meta(k TEXT PRIMARY KEY,v TEXT NOT NULL);\nCREATE TABLE bars(symbol TEXT,t TEXT,o REAL,h REAL,l REAL,c REAL,v REAL,PRIMARY KEY(symbol,t));\nCREATE TABLE decisions(symbol TEXT,t TEXT,strategy TEXT,target INTEGER,atr REAL,regime TEXT,PRIMARY KEY(symbol,t));\nCREATE TABLE watermarks(symbol TEXT PRIMARY KEY,t TEXT NOT NULL);\nCREATE TABLE strategies(id TEXT PRIMARY KEY,name TEXT,source TEXT,rule_ids TEXT,parent_id TEXT,generation INTEGER,status TEXT,regime TEXT,born TEXT);\nCREATE UNIQUE INDEX one_champ_per_regime ON strategies(status,regime) WHERE status='champion' AND regime IS NOT NULL;\nCREATE UNIQUE INDEX one_champ_global ON strategies(status) WHERE status='champion' AND regime IS NULL;\nCREATE UNIQUE INDEX one_child_per_regime ON strategies(status,regime) WHERE status='challenger' AND regime IS NOT NULL;\nCREATE TABLE trials(strategy TEXT,cut TEXT,phase TEXT,metrics TEXT,PRIMARY KEY(strategy,cut,phase));\nCREATE TABLE rules(id TEXT PRIMARY KEY,text TEXT,feature TEXT,state TEXT,created_at TEXT,parent TEXT);\nCREATE TABLE lessons(id TEXT PRIMARY KEY,lot TEXT,rule_id TEXT,lesson TEXT,created_at TEXT);\nCREATE TABLE reflections(id TEXT PRIMARY KEY,subject TEXT,message TEXT,at TEXT);\nCREATE TABLE regimes(t TEXT PRIMARY KEY,label TEXT,indicators TEXT);\nCREATE TABLE intents(id TEXT PRIMARY KEY,lot TEXT,symbol TEXT,strategy TEXT,side TEXT,qty TEXT,stop_gap TEXT,state TEXT,broker TEXT UNIQUE,created TEXT);\nCREATE TABLE fills(id TEXT PRIMARY KEY,intent TEXT NOT NULL REFERENCES intents(id),qty TEXT,price TEXT,at TEXT);\nCREATE TABLE outcomes(id TEXT PRIMARY KEY,lot TEXT,strategy TEXT,symbol TEXT,qty TEXT,entry REAL,exit REAL,gross REAL,at TEXT);\nCREATE TABLE lots(id TEXT PRIMARY KEY,symbol TEXT,strategy TEXT,qty TEXT,basis TEXT,opened TEXT,gap TEXT);\nCREATE TABLE unsolved_failures(id TEXT PRIMARY KEY,lot TEXT,symbol TEXT,regime TEXT,strategy TEXT,pnl REAL,cause TEXT,attempts INTEGER,status TEXT,created_at TEXT,report TEXT);\n"
 
 def init(path):
     path = Path(path)
@@ -56,6 +56,8 @@ def init(path):
                     c.execute("CREATE UNIQUE INDEX IF NOT EXISTS one_champ_per_regime ON strategies(status,regime) WHERE status='champion' AND regime IS NOT NULL")
                     c.execute("CREATE UNIQUE INDEX IF NOT EXISTS one_champ_global ON strategies(status) WHERE status='champion' AND regime IS NULL")
                     c.execute("CREATE UNIQUE INDEX IF NOT EXISTS one_child_per_regime ON strategies(status,regime) WHERE status='challenger' AND regime IS NOT NULL")
+                if 'unsolved_failures' not in tables:
+                    c.execute("CREATE TABLE unsolved_failures(id TEXT PRIMARY KEY, lot TEXT, symbol TEXT, regime TEXT, strategy TEXT, pnl REAL, cause TEXT, attempts INTEGER, status TEXT, created_at TEXT, report TEXT)")
             else:
                 for sql in SCHEMA.split(';'):
                     if sql.strip():
@@ -63,6 +65,17 @@ def init(path):
                 c.execute("insert into meta values ('schema','hourly-paper-1')")
                 c.execute("insert into meta values ('since',?)", (now(),))
     return path
+
+def record_unsolved_failure(c, lot, symbol, regime, strategy, pnl, cause, report):
+    """Queue or update an unsolved failure for human review if AI cannot repair it."""
+    fid = key('failure', lot, strategy)
+    row = c.execute('select attempts from unsolved_failures where id=?', (fid,)).fetchone()
+    if row:
+        c.execute('update unsolved_failures set attempts=attempts+1, report=? where id=?', (report, fid))
+    else:
+        c.execute('insert into unsolved_failures values(?,?,?,?,?,?,?,?,?,?,?)',
+                  (fid, lot, symbol, regime, strategy, pnl, cause, 1, 'queued_for_human', now(), report))
+
 
 def put(c, k, v):
     c.execute('insert into meta values(?,?) on conflict(k) do update set v=excluded.v', (k, str(v)))
