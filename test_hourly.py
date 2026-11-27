@@ -7,8 +7,9 @@ from unittest.mock import patch, Mock
 import numpy as np
 import pandas as pd
 from config import Settings
-from paper_store import init, db, put, now, stamp
+from paper_store import init, db, put, now, stamp, key
 from executor import StrategyExecutor, AlpacaPaper, fresh
+from paper_order_policy import EntryEvidence, instant
 from backtester import Backtester
 from strategy_worker import SEED, compile_strategy
 from hourly_features import enrich, signals
@@ -24,6 +25,7 @@ def bars(n=400):
     return pd.DataFrame(dict(open=v, high=v + 2, low=v - 2, close=v + 0.3, volume=100), index=idx)
 
 class Fake:
+    orders_enabled = True
 
     def __init__(self):
         self.hold = {}
@@ -47,6 +49,13 @@ class Fake:
 
     def quote(self, symbol):
         return (self.bid, self.ask, now())
+
+    def entry_evidence(self, symbol, decision):
+        end = instant(decision)
+        return EntryEvidence(
+            'acct', symbol, (end - timedelta(hours=1)).isoformat(), end.isoformat(),
+            (end - timedelta(hours=2)).isoformat(), (end + timedelta(hours=3)).isoformat(),
+            end.isoformat(), end.isoformat(), D(0), D(1), True, True, True, True)
 
     def submit(self, cid, symbol, side, qty):
         self.submits.append(cid)
@@ -75,35 +84,68 @@ class Hourly(unittest.TestCase):
         self.mut = Mock()
         self.mut.propose.return_value = None
 
+    def seed_decision(self):
+        from hourly_features import ALL_READY, FEATURE_VERSION
+        from market_observations import record_observation
+        from strategy_worker import FEATURES
+        bar = (datetime.now(timezone.utc) - timedelta(seconds=60)).isoformat()
+        with sqlite3.connect(self.p.with_name('learning_loop.sqlite')) as journal:
+            journal.execute('create table ll_meta(k text primary key, v text not null)')
+            journal.execute('create table ll_receipts(seq integer primary key)')
+            journal.executemany('insert into ll_meta(k,v) values(?,?)', [
+                ('halted', 'false'), ('store_id', '"fixture-store"'), ('owner', '"fixture-owner"')])
+        journal.close()
+        with db(self.p, True) as c:
+            put(c, 'learning_store', 'fixture-store')
+            put(c, 'learning_owner', 'fixture-owner')
+            put(c, 'integrity_entries_paused', 'NO')
+            put(c, 'entry_gate_bull_quiet', 's')
+            c.execute("insert into strategies(id,name,source,rule_ids,parent_id,generation,status,regime,born) "
+                      "values(?,?,?,?,?,?,?,?,?)",
+                      ('s', 'fixture', SEED, '["trend","r"]', None, 1, 'champion', 'bull_quiet', bar))
+            c.execute('insert into decisions(symbol,t,strategy,target,atr,regime) values(?,?,?,?,?,?)',
+                      ('AAPL', bar, 's', 1, 1, 'bull_quiet'))
+            c.execute('insert into watermarks(symbol,t) values(?,?)', ('AAPL', bar))
+            end = instant(bar)
+            record_observation(c, 'AAPL', bar, dict(open=100, high=101, low=99, close=100,
+                volume=1000, interval_kind='XNYS_1m', interval_start=end-timedelta(hours=1),
+                interval_end=end, received_at=bar, feed='offline-fixture'))
+            c.execute("""insert into decision_snapshots(symbol,t,strategy,lot,regime,feature_version,
+                readiness_mask,history_ready,flags,rsi,received_at,content_hash)
+                select symbol,t,'s',?,'bull_quiet',?,?,1,?,50,received_at,content_hash
+                from usable_bars where symbol='AAPL' and t=?""",
+                (key('lot', 'AAPL', bar), FEATURE_VERSION, ALL_READY,
+                 json.dumps({name: True for name in FEATURES}), bar))
+        return bar
+
     def start(self):
         self.assertTrue(self.e.reconcile_trades()[1])
-        with db(self.p, True) as c:
-            put(c, 'entry_gate', 's')
-            c.execute('insert into strategies values(?,?,?,?,?,?,?,?,?)', ('s', 'fixture', SEED, '["trend","r"]', None, 1, 'champion', None, now()))
-        return self.e._open_position('TEST', '1', 's', '2', now())
+        bar = self.seed_decision()
+        with patch.dict(os.environ, {'PAPER_ENTRIES_ENABLED': 'YES'}):
+            return self.e._open_position('AAPL', '.01', 's', '2', bar)
 
     def test_confirmed_partial_across_midnight_and_restart(self):
         o = self.start()
-        self.b.fill(o.client_order_id, '1', 100, '2025-01-01T22:00:00Z')
+        self.b.fill(o.client_order_id, '.01', 100, '2025-01-01T22:00:00Z')
         lots, ok = self.e.reconcile_trades()
         self.assertTrue(ok)
         self.assertTrue(self.e._close_position(lots[0], 'risk'))
         cid = self.b.submits[-1]
-        self.b.fill(cid, '.5', 102, '2025-01-01T23:59:59Z')
+        self.b.fill(cid, '.005', 102, '2025-01-01T23:59:59Z')
         self.assertTrue(self.e.reconcile_trades()[1])
-        self.b.fill(cid, '.5', 98, '2025-01-02T00:00:00Z')
+        self.b.fill(cid, '.005', 98, '2025-01-02T00:00:00Z')
         self.e = StrategyExecutor(self.p, self.b, self.s)
         self.assertEqual(self.e.reconcile_trades(), ([], True))
         self.assertEqual(self.e.reconcile_trades(), ([], True))
         curve = read_view('equity-curve', path=self.p)
-        self.assertEqual([x['equity'] for x in curve], [1, 0])
+        self.assertEqual([x['equity'] for x in curve], [0.01, 0])
         hour = read_view('hourly', path=self.p)
-        self.assertEqual([x['total_trades'] for x in hour], [1, 0])
+        self.assertEqual([x['total_trades'] for x in hour if x['h'].startswith('2025-01-')], [1, 0])
         self.assertEqual(len(self.b.submits), 2)
 
     def test_outage_no_closes_or_orders(self):
         o = self.start()
-        self.b.fill(o.client_order_id, '1', 100, now())
+        self.b.fill(o.client_order_id, '.01', 100, now())
         self.e.reconcile_trades()
         self.b.fail = True
         self.assertIn('unknown', self.e.sync_positions())
@@ -129,7 +171,7 @@ class Hourly(unittest.TestCase):
 
     def test_conflicting_fill_blocks(self):
         o = self.start()
-        self.b.fill(o.client_order_id, '1', 100, now())
+        self.b.fill(o.client_order_id, '.01', 100, now())
         self.e.reconcile_trades()
         self.b.activity[0]['price'] = '101'
         self.assertFalse(self.e.reconcile_trades()[1])
@@ -137,13 +179,13 @@ class Hourly(unittest.TestCase):
 
     def test_terminal_cancel_releases_only_remainder(self):
         o = self.start()
-        self.b.fill(o.client_order_id, '.3', 100, now())
+        self.b.fill(o.client_order_id, '.003', 100, now())
         o.status = 'canceled'
         lots, ok = self.e.reconcile_trades()
         self.assertTrue(ok)
-        self.assertEqual(D(lots[0]['qty']), D('.3'))
+        self.assertEqual(D(lots[0]['qty']), D('.003'))
         self.e._close_position(lots[0], 'exit')
-        self.assertEqual(self.b.orders[self.b.submits[-1]].qty, D('.3'))
+        self.assertEqual(self.b.orders[self.b.submits[-1]].qty, D('.003'))
 
     def test_flat_signals_not_carried(self):
         f = bars(5)
@@ -203,15 +245,13 @@ class Hourly(unittest.TestCase):
 
     def test_live_locked_before_sdk_import(self):
         with patch.dict(os.environ, {'ALPACA_BASE_URL': 'https://api.alpaca.markets'}):
-            self.assertRaises(ValueError, AlpacaPaper, Settings.load())
+            self.assertRaises(ValueError, Settings.load)
+        from dataclasses import replace
+        unsafe = replace(self.s, alpaca=replace(self.s.alpaca, base_url="https://api.alpaca.markets"))
+        self.assertRaises(ValueError, AlpacaPaper, unsafe)
 
     def test_autonomous_entry_and_supervised_exit(self):
-        bar = (datetime.now(timezone.utc) - timedelta(hours=1, minutes=1)).isoformat()
-        with db(self.p, True) as c:
-            put(c, 'entry_gate', 's')
-            c.execute('insert into strategies values(?,?,?,?,?,?,?,?,?)', ('s', 'fixture', SEED, '["trend","r"]', None, 1, 'champion', None, bar))
-            c.execute('insert into decisions values(?,?,?,?,?,?)', ('TEST', bar, 's', 1, 1, 'bull_quiet'))
-            c.execute('insert into watermarks values(?,?)', ('TEST', bar))
+        bar = self.seed_decision()
         with patch.dict(os.environ, {'PAPER_ENTRIES_ENABLED': 'YES'}):
             self.assertEqual(self.e.sync_positions(), 'entry submitted')
         o = self.b.orders[self.b.submits[0]]
@@ -229,27 +269,28 @@ class Hourly(unittest.TestCase):
         learn_from_closes(self.p, self.mut)
         self.assertEqual(len(read_view('lessons', 10, self.p)), 1)
 
-    def test_candidate_frozen_then_prospectively_promoted(self):
-        # Deterministic market fixture, not evidence that the strategy works on Alpaca.
-        f = enrich(bars(1250))
+    def test_profitable_development_fixture_requires_independent_promotion_evidence(self):
+        f = enrich(bars(1250)).rename(index={'TEST': 'AAPL'}, level='symbol')
         i = np.arange(len(f))
         f['open'] = np.where(i % 4 == 2, 104.0, 100.0)
-        f['close'] = f.open
-        f['high'] = f.open + 1
-        f['low'] = f.open - 1
+        f['close'], f['high'], f['low'] = f.open, f.open + 1, f.open - 1
         f['support'] = i % 4 == 0
         src = SEED.split(':')[0] + ':\n    return 1'
-        self.mut.propose.return_value = dict(name='fixture', source=src, guard='support', lesson='Test the support guard')
-        reg = dict(label='sideways_quiet', indicators={})
-        born = f.index[599][1].isoformat()
-        with patch('research.now', return_value=born):
-            review(self.p, self.s, f.iloc[:400], f.iloc[400:600], reg, self.mut)
-        self.assertFalse(read_view('strategy', path=self.p))
-        review(self.p, self.s, f.iloc[:600], f.iloc[600:700], reg, self.mut)
-        self.assertFalse(read_view('strategy', path=self.p))
-        review(self.p, self.s, f.iloc[:800], f.iloc[800:1100], reg, self.mut)
-        self.assertEqual(read_view('strategy', path=self.p)['name'], 'fixture')
-        self.assertIn('supported', read_view('rules', path=self.p)[0]['rule'])
+        self.mut.propose.return_value = dict(name='fixture', source=src, guard='support', lesson='Test support')
+        observed = {t.isoformat(): 'trend_up' for t in f.index.get_level_values('timestamp')}
+        review(self.p, self.s, f.iloc[:700], f.iloc[700:], dict(label='trend_up', indicators={},
+               observed_by_time=observed), self.mut)
+        with db(self.p) as c:
+            candidate = c.execute("select * from strategies where name='fixture'").fetchone()
+            self.assertEqual(candidate['status'], 'development')
+            self.assertEqual(candidate['source'], src)
+            frozen = json.loads(c.execute('select manifest from development_manifests where id=?',
+                                          (candidate['id'],)).fetchone()[0])
+            self.assertEqual((frozen['source'], frozen['guard']), (src, 'support'))
+            metrics = json.loads(c.execute("select metrics from trials where strategy=?",
+                                           (candidate['id'],)).fetchone()[0])
+            self.assertGreater(metrics['pnl'], 0)
+            self.assertEqual(c.execute("select count(*) from strategies where status='champion'").fetchone()[0], 0)
         self.assertFalse(self.b.submits)
 
     def test_bad_holdout_does_not_promote(self):
@@ -261,14 +302,14 @@ class Hourly(unittest.TestCase):
 
     def test_tampered_snapshot_blocks_realization(self):
         o = self.start()
-        self.b.fill(o.client_order_id, '1', 100, now())
+        self.b.fill(o.client_order_id, '.01', 100, now())
         self.b.hold.clear()
         self.assertFalse(self.e.reconcile_trades()[1])
         self.assertEqual(read_view('equity-curve', path=self.p), [])
 
     def test_second_symbol_cannot_overlap(self):
         o = self.start()
-        self.b.fill(o.client_order_id, '1', 100, now())
+        self.b.fill(o.client_order_id, '.01', 100, now())
         self.e.reconcile_trades()
         self.assertIsNone(self.e._open_position('XYZ', 1, 's', 1, 'another'))
         self.assertEqual(len(self.b.submits), 1)
@@ -284,16 +325,32 @@ class Hourly(unittest.TestCase):
     def test_dashboard_reader_cannot_create_table(self):
         with db(self.p) as c:
             self.assertRaises(sqlite3.OperationalError, c.execute, 'create table nope(id)')
-    def test_hourly_request_excludes_forming_bar_and_warms_holdout(self):
-        import sys,types
+    def test_minute_ingestion_excludes_forming_interval_and_isolates_crypto_outage(self):
+        from alpaca.data.timeframe import TimeFrame
         from data_ingestor import DataIngestor
-        fake=types.ModuleType('alpaca.data.timeframe');fake.TimeFrame=N(Hour='1Hour')
-        ing=DataIngestor.__new__(DataIngestor);ing.settings=self.s
-        f=bars(900);latest=pd.Timestamp.now(tz='UTC').floor('h');dates=pd.date_range(end=latest,periods=len(f),freq='h');f.index=pd.MultiIndex.from_product([['TEST'],dates],names=['symbol','timestamp']);ing.fetch_bars=Mock(return_value=f)
-        with patch.dict(sys.modules,{'alpaca.data.timeframe':fake}):tr,te=ing.get_train_test_split()
-        self.assertEqual(ing.fetch_bars.call_args.args[1],'1Hour');self.assertLess(tr.index[-1][1],te.index[0][1]);self.assertLess(te.index[-1][1],latest);self.assertEqual(te.ema50.iloc[0],enrich(f).loc[te.index[0],'ema50']);self.assertIn(ing.detect_regime(te)['label'],('bull_quiet','bull_volatile','bear_quiet','bear_volatile','sideways_quiet','sideways_volatile'))
+
+        ing = DataIngestor.__new__(DataIngestor)
+        ing.settings = self.s
+        end = pd.Timestamp('2025-06-04T15:05:00Z')
+        times = pd.date_range('2025-06-02T13:30:00Z', end, freq='min')
+        idx = pd.MultiIndex.from_product([['AAPL'], times], names=['symbol','timestamp'])
+        minutes = pd.DataFrame(dict(open=100, high=102, low=98, close=101, volume=17), index=idx)
+        def fetch(symbols, timeframe, start, stop):
+            if any('/' in symbol for symbol in symbols):
+                raise TimeoutError('offline fixture')
+            self.assertEqual(timeframe.value, TimeFrame.Minute.value)
+            self.assertIn('SPY', symbols)
+            return minutes.loc[(times >= start) & (times <= stop)]
+        ing.fetch_bars = Mock(side_effect=fetch)
+        tr, te = ing.get_train_test_split(2, 1, as_of=end)
+        self.assertLess(tr.index[-1][1], te.index[0][1])
+        self.assertEqual(te.index[-1][1], pd.Timestamp('2025-06-04T14:30:00Z'))
+        self.assertEqual(te.volume.iloc[-1], 60 * 17)
+        self.assertEqual(te.interval_kind.iloc[-1], 'XNYS_1m')
+        self.assertTrue(any(d['error'] == 'TimeoutError' for d in ing.diagnostics))
+
     def test_position_snapshot_alone_does_not_confirm_reported_fill(self):
-        o=self.start();self.b.fill(o.client_order_id,'1',100,now());self.b.activity=[];self.assertFalse(self.e.reconcile_trades()[1]);self.assertEqual(read_view('trades',10,self.p),[])
+        o=self.start();self.b.fill(o.client_order_id,'.01',100,now());self.b.activity=[];self.assertFalse(self.e.reconcile_trades()[1]);self.assertEqual(read_view('trades',10,self.p),[])
     def test_foreign_account_cannot_resume(self):
         self.start();original=self.b.snapshot;self.b.snapshot=lambda:('different',*original()[1:]);self.assertFalse(self.e.reconcile_trades()[1])
     def test_negative_cost_not_a_subsidy(self):

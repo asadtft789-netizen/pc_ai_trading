@@ -11,6 +11,9 @@ import os
 from dataclasses import dataclass, field
 from typing import List
 
+PAPER_ORIGIN = "https://paper-api.alpaca.markets"
+PAPER_EQUITIES = frozenset(("AAPL", "MSFT", "NVDA", "TSLA"))
+
 
 def _getenv(key: str, default: str) -> str:
     return os.environ.get(key, default)
@@ -43,7 +46,7 @@ class AlpacaConfig:
 
     @property
     def is_paper(self) -> bool:
-        return self.base_url.rstrip("/") == "https://paper-api.alpaca.markets"
+        return self.base_url in (PAPER_ORIGIN, PAPER_ORIGIN + "/")
 
 
 @dataclass(frozen=True)
@@ -68,7 +71,7 @@ class RiskConfig:
     max_position_usd: float
     max_daily_loss_usd: float
     max_order_size_usd: float = 1.0
-    min_order_size_usd: float = 0.01
+    min_order_size_usd: float = 1.0
     commission_per_order_usd: float = 0.0
     spread_bps: float = 5.0
     slippage_bps: float = 5.0
@@ -133,7 +136,7 @@ class Settings:
                 max_position_usd=_getenv_float("MAX_POSITION_USD", 1.0),
                 max_daily_loss_usd=_getenv_float("MAX_DAILY_LOSS_USD", 0.50),
                 max_order_size_usd=_getenv_float("MAX_ORDER_SIZE_USD", 1.0),
-                min_order_size_usd=_getenv_float("MIN_ORDER_SIZE_USD", 0.01),
+                min_order_size_usd=_getenv_float("MIN_ORDER_SIZE_USD", 1.0),
                 commission_per_order_usd=_getenv_float("COMMISSION_PER_ORDER_USD", 0.0),
                 spread_bps=_getenv_float("SPREAD_BPS", 5.0),
                 slippage_bps=_getenv_float("SLIPPAGE_BPS", 5.0),
@@ -151,8 +154,13 @@ class Settings:
             ),
         )
         r = result.risk
-        if min(r.max_capital_usd, r.max_position_usd, r.max_order_size_usd, r.max_daily_loss_usd, r.min_order_size_usd) <= 0 or r.min_order_size_usd > min(r.max_capital_usd, r.max_position_usd, r.max_order_size_usd):
+        if not result.alpaca.is_paper:
+            raise ValueError("paper broker origin required")
+        if min(r.max_capital_usd, r.max_position_usd, r.max_order_size_usd, r.max_daily_loss_usd, r.min_order_size_usd) <= 0:
             raise ValueError('inconsistent risk limits')
+        if (r.max_capital_usd > 10 or r.max_position_usd > 1
+                or r.max_order_size_usd > 1 or r.max_daily_loss_usd > 0.50):
+            raise ValueError("configured risk limits exceed the authorized paper allocation")
         if not result.universe.symbols or len(set(result.universe.symbols)) != len(result.universe.symbols):
             raise ValueError('invalid symbol universe')
         return result

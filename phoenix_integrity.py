@@ -3,18 +3,28 @@ import json
 import sqlite3
 from pathlib import Path
 from contextlib import closing
-from paper_store import get
+from paper_store import db, get
 
 
 def learning_halted(path):
     sidecar = Path(path).resolve().parent / 'learning_loop.sqlite'
-    if not sidecar.exists():
-        return False
     try:
+        with db(path) as operational:
+            owner = get(operational, 'learning_owner')
+            store = get(operational, 'learning_store')
+            consumed = int(get(operational, 'learning_consumed_seq', '0'))
+            progress = json.loads(get(operational, 'learning_progress', '{}'))
+        if not owner or not store or consumed < 0 or progress.get('state') == 'recovery_required':
+            return True
         with closing(sqlite3.connect(sidecar.as_uri() + '?mode=ro', uri=True, timeout=2)) as c:
-            row = c.execute("select v from ll_meta where k='halted'").fetchone()
-            return bool(json.loads(row[0])) if row else False
-    except (sqlite3.Error, ValueError, OSError):
+            c.execute("pragma query_only=on")
+            c.execute("begin")
+            meta = {k: json.loads(v) for k, v in c.execute(
+                "select k,v from ll_meta where k in ('halted','store_id','owner')")}
+            seq = c.execute('select coalesce(max(seq),0) from ll_receipts').fetchone()[0]
+            return (meta.get('halted') is not False or meta.get('store_id') != store
+                    or meta.get('owner') != owner or seq < consumed)
+    except (sqlite3.Error, ValueError, TypeError, AttributeError, OSError):
         return True
 
 
