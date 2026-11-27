@@ -262,7 +262,8 @@ class Ledger:
     def _reg(self,r:Rule) -> None: self.db.execute('INSERT OR IGNORE INTO ll_rules VALUES(?,?,?,?)',(r.version,r.key,int(self.clock()),encode(asdict(r))))
     def state(self) -> Json: return {r[0]:json.loads(r[1]) for r in self.db.execute('SELECT k,v FROM ll_meta')}
     def _days(self) -> list[Session]: return [Session(x['label'],x['opened'],tuple(x['cuts'])) for x in self._get('config')['sessions']]
-    def setup(self, start: str, sessions: Sequence[Session], symbols: Sequence[str], risk: Risk, champion: Book) -> None:
+    def setup(self, start: str, sessions: Sequence[Session], symbols: Sequence[str], risk: Risk, champion: Book,
+              *, previous_config: str | None = None, calendar_id: str | None = None) -> None:
         """Calendar supplied by caller: all regular sessions in [start date, next-month date)."""
         begin=date.fromisoformat(start); stop=next_month(begin); risk.validate(); source(champion)
         require(len(sessions)>=11 and len(set(symbols))==len(symbols)>0 and all(isinstance(s,str) and s.strip()==s and s for s in symbols),'invalid universe/calendar')
@@ -270,10 +271,29 @@ class Ledger:
         for day in sessions:
             day.validate(); require(begin<=date.fromisoformat(day.label)<stop and day.opened>last and day.label>label,'invalid session sequence'); last=day.cuts[-1]; label=day.label
         cfg={'model_policy':{'engine_sha256':hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),'extra_slippage_bps_per_side':[1,2],'late_batch_seconds':120,'allocation':'alphabetical, shared cash','drawdown_marks':'opens and closes, including stop fills','min_differing_episodes':20,'split_sessions':[2,3]},'start':start,'end_exclusive':stop.isoformat(),'sessions':[asdict(s) for s in sessions],'symbols':sorted(symbols),'risk':asdict(risk)}
+        if calendar_id is not None:
+            cfg['calendar_id'] = calendar_id
         with self.tx():
-            require(self._get('config') is None,'run already initialized'); require(self.clock()<sessions[0].opened,'register before first session')
-            self._set('config',cfg); self._set('active',pack(champion)); self._set('original',pack(champion)); self._set('halted',False)
-            for r in champion.values(): self._reg(r); self._set('rule_state:'+r.version,'unvalidated')
+            old = self._get('config')
+            require(self.clock()<sessions[0].opened,'register before first session')
+            if previous_config is None:
+                require(old is None,'run already initialized')
+                self._set('halted',False)
+            else:
+                require(old is not None and digest(old) == previous_config, 'campaign changed during rollover')
+                old_last = old['sessions'][-1]['cuts'][-1]
+                require(self.clock() >= old_last and sessions[0].opened > old_last, 'previous campaign unfinished')
+                self._event('campaign_closed', {'config': old, 'original':self._get('original'),
+                            'active':self._get('active'), 'halted':self._get('halted')})
+                self.db.execute("""UPDATE ll_trials SET state='inconclusive', result=?
+                                   WHERE state='testing'""",
+                                (encode({'status':'inconclusive','why':'campaign ended without a verdict'}),))
+                self.db.execute("UPDATE ll_trials SET state='expired' WHERE state='staged'")
+            self._set('config',cfg); self._set('active',pack(champion)); self._set('original',pack(champion))
+            for r in champion.values():
+                self._reg(r)
+                if self._get('rule_state:'+r.version) is None:
+                    self._set('rule_state:'+r.version,'unvalidated')
             self._event('run_registered',{'config':cfg,'book':pack(champion)})
 
     def bar(self, cut: int, values: Mapping[str,Bar]) -> bool:

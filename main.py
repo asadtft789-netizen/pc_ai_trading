@@ -1,145 +1,76 @@
 """Two independent processes: hourly research and a short-cadence paper supervisor."""
-import argparse, ast, logging, os, sqlite3, time
-from datetime import date, datetime, timedelta, timezone
-from datetime import time as dtime
+import argparse
+import json
+import logging
+import os
+import sqlite3
+import time
+from datetime import datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
+
 import pandas as pd
 from config import Settings
 from paper_store import init, db, put, now
 from executor import PAPER
-from learning_loop import Bar as LLBar, Ledger, Risk, Session, mask, FEATURES as LL_FEATURES, Rule
-from learning_loop_adapter import close_tick, session_open, UNKNOWN_GATES
-from hourly_features import enrich
+from learning_runtime import LearningRecoveryRequired, observe_new_bars
+from market_time import equity_sessions
+from regime_detector import point_in_time_regimes
 from research import REGIMES
+
 ROOT = Path(__file__).resolve().parent
 
-LEARNING_DB = str(ROOT / 'data' / 'learning_loop.sqlite')
-_ledger = None
 
-
-def _build_forward_sessions(start_date, num_days=60):
-    from calendar import monthrange
-    sessions = []
-    d = start_date
-    added = 0
-    year = d.year + (d.month == 12)
-    month = d.month % 12 + 1
-    stop = date(year, month, min(d.day, monthrange(year, month)[1]))
-    while added < num_days and d < stop:
-        if d.weekday() < 5:
-            opened = int(datetime.combine(d, dtime(13, 30), tzinfo=timezone.utc).timestamp())
-            cuts = tuple(opened + 3600 * i for i in range(1, 7)) + (opened + 23400,)
-            sessions.append(Session(label=d.isoformat(), opened=opened, cuts=cuts))
-            added += 1
-        d += timedelta(days=1)
-    return sessions
-
-
-def _champion_to_book(con):
-    row = con.execute("select source from strategies where status='champion'").fetchone()
-    if not row:
-        return None
-    tree = ast.parse(row[0])
-    fn = tree.body[0]
-    expr = ast.unparse(fn.body[0].value.test)
-    return {
-        'ENTRY': Rule('ENTRY', 'Daemon champion', expr),
-        'SPREAD': Rule('SPREAD', 'Executor-owned spread gate; needs verified quotes.', None),
-        'EXIT': Rule('EXIT', 'Executor-owned protection and session exit.', None),
-    }
-
-
-def _init_learning_ledger(db_path, s):
-    global _ledger
-    if _ledger is not None:
-        return _ledger
-
-    # Read champion from the daemon DB; sidecar ledger is separate.
-    con = sqlite3.connect(db_path)
-    book = _champion_to_book(con)
-    con.close()
-    if not book:
-        return None
-
-    sessions = _build_forward_sessions(date.today() + timedelta(days=1))
-    if not sessions:
-        return None
-
-    clock_state = {'t': float(sessions[0].opened - 1)}
-
-    def clock():
-        return clock_state['t']
-
-    ledger = Ledger(LEARNING_DB, clock=clock)
-    risk = Risk(
-        cash=float(s.risk.max_capital_usd),
-        order_cap=float(s.risk.max_order_size_usd),
-        fee_bps=float(s.risk.spread_bps + s.risk.slippage_bps),
-        daily_loss=float(s.risk.max_daily_loss_usd),
-        max_drawdown_fraction=0.10,
-        max_positions=1,
-        quantity_step=0.000000001,
-        max_stop_risk=1.0,
-        no_entry_last_seconds=1800,
-    )
-
-    ledger.setup(sessions[0].label, sessions, s.universe.symbols, risk, book)
-    clock_state['t'] = time.time()
-    _ledger = ledger
-    return _ledger
-
-
-def _observe_new_bars(db_path, s):
-    """Feed new completed bars to the learning loop sidecar."""
-    ledger = _init_learning_ledger(db_path, s)
-    if ledger is None:
-        return
-
-    with db(db_path) as c:
-        marks = dict(c.execute('select symbol, t from watermarks'))
-
-    con = sqlite3.connect(db_path)
-    rows = con.execute('select symbol, t, o as open, h as high, l as low, c as close, v as volume from bars').fetchall()
-    con.close()
-    if not rows:
-        return
-
-    df = pd.DataFrame(rows, columns=['symbol', 't', 'open', 'high', 'low', 'close', 'volume'])
-    df['t'] = pd.to_datetime(df['t'])
-    df = df.set_index(['symbol', 't']).sort_index()
-
+def research_tick(path, settings, ingest, mutator):
+    from research import ingest_observations, review
+    from rule_review import drift, learn_from_closes
+    train, test = ingest.get_train_test_split()
+    with db(path, True) as c:
+        put(c, 'ingestion_diagnostics', json.dumps(ingest.diagnostics))
+    results = {}
+    if not train.empty and not test.empty:
+        ingest_observations(path, train, test)
+    # A sidecar recovery incident must not suppress other research consumers.
     try:
-        enriched = enrich(df)
-    except Exception:
-        return
+        results['learning'] = observe_new_bars(path, settings)
+    except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
+        reason = str(exc) if isinstance(exc, LearningRecoveryRequired) else type(exc).__name__
+        results['learning'] = {'reason': reason, 'state': 'recovery_required', 'at': now(),
+                               'next_action': 'Verify the bound operational and learning databases before resuming.'}
+        with db(path, True) as c:
+            put(c, 'learning_progress', json.dumps(results['learning']))
+    if not train.empty and not test.empty:
+        frame = pd.concat([train, test]).sort_index()
+        labels, summary = point_in_time_regimes(frame)
+        equity = ~labels.index.get_level_values('symbol').str.contains('/', regex=False)
+        by_time = {t.isoformat(): label for t, label in labels[equity].groupby(level='timestamp').first().items()}
+        for scope in REGIMES:
+            regime = dict(summary, label=scope, observed_regime=summary['label'], observed_by_time=by_time)
+            try:
+                results[scope] = review(path, settings, train, test, regime, mutator, observations_committed=True)
+            except Exception as exc:
+                # Preserve independent scopes and publish the failure without provider payloads.
+                results[scope] = {'error': type(exc).__name__}
+                with db(path, True) as c:
+                    put(c, 'entry_gate_' + scope, 'closed')
+    else:
+        results['ingestion'] = 'insufficient_history'
+    learn_from_closes(path, mutator)
+    drift(path)
+    with db(path, True) as c:
+        put(c, 'research_scope_status', json.dumps(results))
+    return results
 
-    symbols = set(s.universe.symbols)
-    for cut, group in enriched.groupby(level='t'):
-        if set(group.index.get_level_values('symbol')) != symbols:
-            continue
-        if not all(marks.get(sym, '') < cut.isoformat() for sym in symbols):
-            continue
 
-        batch = {}
-        for sym in symbols:
-            row = group.xs(sym, level='symbol')
-            features = {f: bool(row[f].iloc[0]) for f in LL_FEATURES}
-            batch[sym] = LLBar(
-                o=float(row['open'].iloc[0]),
-                h=float(row['high'].iloc[0]),
-                l=float(row['low'].iloc[0]),
-                c=float(row['close'].iloc[0]),
-                bits=mask(features),
-                stop_gap=float(row['atr'].iloc[0]) if pd.notna(row['atr'].iloc[0]) else 0.01,
-                entry_ok=True,
-                entry_cap=float(s.risk.max_order_size_usd),
-            )
+def seconds_to_next_observation(stamp):
+    # Equity intervals close on exchange-local half hours and at the actual close.
+    local_day = datetime.fromtimestamp(stamp, ZoneInfo('America/New_York')).date()
+    sessions = equity_sessions(local_day, local_day + timedelta(days=2))
+    future = [cut + 15 for day in sessions for cut in day.cuts if cut + 15 > stamp]
+    # UTC-hourly crypto observations have a separate schedule.
+    next_crypto = ((int(stamp) - 15) // 3600 + 1) * 3600 + 15
+    return max(1, min([next_crypto, *future]) - stamp)
 
-        cut_ts = int(cut.timestamp())
-        try:
-            close_tick(ledger, cut_ts, batch, gates=lambda _: UNKNOWN_GATES)
-        except Exception:
-            pass
 
 class SecretRedactingFilter(logging.Filter):
 
@@ -192,24 +123,12 @@ def main():
     logging.getLogger().addHandler(logging.NullHandler())
     if args.role == 'research':
         from data_ingestor import DataIngestor
-        from research import review
         from llm_mutator import LLMMutator
-        from rule_review import drift, learn_from_closes
-        ingest = DataIngestor(s, None)
+        ingest = DataIngestor(s, None, observation_path=path)
         mut = LLMMutator(s)
 
         def tick():
-            learn_from_closes(path, mut)
-            train, test = ingest.get_train_test_split()
-            results = []
-            for rl in REGIMES:
-                rg = dict(ingest.detect_regime(test))
-                rg['label'] = rl
-                res = review(path, s, train, test, rg, mut)
-                results.append(res)
-            drift(path)
-            _observe_new_bars(path, s)
-            return results
+            return research_tick(path, s, ingest, mut)
     else:
         from executor import StrategyExecutor, AlpacaPaper
         adapter = StrategyExecutor(path, AlpacaPaper(s), s)
@@ -232,6 +151,6 @@ def main():
             continue
         if args.once:
             return
-        time.sleep(10 if args.role == 'supervise' else max(1, 3600 - (time.time() - 30) % 3600))
+        time.sleep(10 if args.role == 'supervise' else seconds_to_next_observation(time.time()))
 if __name__ == '__main__':
     main()
