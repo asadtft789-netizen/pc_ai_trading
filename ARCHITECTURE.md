@@ -1,0 +1,8 @@
+# Implementation contracts
+main.py has research, supervise, preflight and offline check roles. The research tick collects and persists market facts once before independent consumers run. DataIngestor requests one-minute equity observations and independent UTC hourly crypto. market_time.py constructs exchange-session intervals. hourly_features.py retains numeric volume and exposes strategy flags only when their inputs are ready. market_observations.py records source versions and quarantines conflicting or ambiguous facts. regime_detector.py uses SPY and BTC/USD anchors.
+
+paper_store.py owns the WAL operational store. The family marker hourly-paper-1 coexists with integer schema version 2. Schema migration preserves original facts and takes a verified backup before changing a legacy store. Review checkpoints are per scope and symbol. learning_runtime.py binds the learning database to its owner and records independent receipts; a replay handles interruption between separate store commits.
+
+research.py persists frozen historical development manifests and lane outcomes. Five logical lanes use at most two proposal workers and sequential evaluation. Deterministic controls require no external spending. Records from this stage cannot authorize activation. campaign_statistics.py implements the paired statistic and Holm adjustment for a supplied family; campaign registration and authoritative evidence production remain open.
+
+executor.py owns reconciliation and order intent transitions for fake-broker acceptance. paper_gateway.py only sends authenticated GETs to fixed origins with redirects disabled. Dashboard routes are read-only. Confirmed gross exits are available. Marked equity, fees and validated activations require further evidence.

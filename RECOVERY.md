@@ -1,0 +1,6 @@
+# Recovery
+Before a migration or restoration pause new exposure through the verified control and preserve supervision of every existing position. Confirm the actual database paths and ledger ownership. Investigate uncertain requests using their original client order ID and independently confirmed fills. A timeout or missing lookup is insufficient evidence for replay.
+
+Create a unique destination outside the project checkout for each database. Run python sqlite_snapshot.py backup SOURCE NEW_SNAPSHOT for the operational store and its bound learning store. Record the time, revision, schema, store identity and receipt sequence for each. These snapshots are individually consistent; they occur at different instants. Keep the pair and verify watermark agreement.
+
+Run python sqlite_snapshot.py restore SNAPSHOT NEW_PATH into isolated files. Verify integrity, receipt ownership, snapshots and all post-backup broker events before cutover. Keep old files. Compare confirmed events with the account and quarantine unexplained differences. Do not roll the ledger back over newer fills. Linux release restore time, hourly scheduling, encrypted off-host retention and outage alert delivery are outstanding.

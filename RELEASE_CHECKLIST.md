@@ -1,0 +1,13 @@
+# Release evidence
+- [x] Audit ancestry, current baseline and existing Oracle checkout inventoried.
+- [x] Application regression suite exercised against isolated databases and fake transports.
+- [x] Local WAL snapshot restored to a new database and verified.
+- [ ] Clear outstanding F01–F24 findings for every released capability.
+- [ ] Demonstrate shared portfolio semantics, costs, risk stops and next-quote execution.
+- [ ] Demonstrate preregistered comparative evidence, calendar completeness and atomic activation.
+- [ ] Independently verify Linux isolation, sole writer, shadow-to-paper parity and recovery.
+- [ ] Measure 48 continuous hours of fault/restart/resource replay on a final eligible revision.
+- [ ] Verify production backup, off-host restore, alert delivery and service health.
+- [ ] Confirm dedicated account, existing positions/orders, fractional capabilities and independent protection.
+- [ ] Establish no-order PAPER_OBSERVE operation and hold two controlled equity paper sessions before broad campaigns.
+- [ ] Complete 21 calendar day operational assessment and distinct 30-session prospective campaign.

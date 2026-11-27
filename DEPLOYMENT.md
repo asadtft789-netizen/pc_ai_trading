@@ -1,0 +1,6 @@
+# Oracle deployment status
+Release status is blocked. The existing Oracle services were inventoried read-only on 2026-11-27. The checkout was 5a5773643e2690b0a301b11aa079781a05ec9e89, with research and supervise processes owned by ubuntu, Ubuntu 24.04.5 on x86_64, 2 CPUs, 952 MiB RAM, 488 MiB available, zero swap and 41 GiB free. Their loaded source was unverified. At 12:25 PKT the local ledger held zero intents, fills and lots and the .env allowed paper entries. This does not establish the broker's holdings.
+
+Use a separate checkout of the intended exact commit. Install requirements-verified.txt into a separate environment, run python offline_suite.py, and retain the platform, lockfile and test results. Use python offline_soak.py NEW_EVIDENCE_DIRECTORY from a clean immutable checkout. Results belong outside the checkout. --smoke runs one cycle and cannot qualify the elapsed gate.
+
+Legacy scripts and DEPLOY.md predate these gates. Keep them out of the release workflow. Before service changes follow IMPLEMENTATION_PLAN.md sections 35–36 and RELEASE_CHECKLIST.md. No deployable cutover has been certified. Retain the existing supervisor until identity, ownership, protection, backup and rollback evidence are available. Do not attach this observation-only gateway to a position that depends on the old supervisor.
