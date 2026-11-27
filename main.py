@@ -21,7 +21,7 @@ from research import REGIMES
 ROOT = Path(__file__).resolve().parent
 
 
-def research_tick(path, settings, ingest, mutator):
+def research_tick(path, settings, ingest, mutator, admission=None):
     from research import ingest_observations, review
     from rule_review import drift, learn_from_closes
     train, test = ingest.get_train_test_split()
@@ -46,6 +46,9 @@ def research_tick(path, settings, ingest, mutator):
         by_time = {t.isoformat(): label for t, label in labels[equity].groupby(level='timestamp').first().items()}
         for scope in REGIMES:
             regime = dict(summary, label=scope, observed_regime=summary['label'], observed_by_time=by_time)
+            if admission is not None and not admission.eligible():
+                results[scope] = {"state":"waiting", "reason":"available_memory"}
+                continue
             try:
                 results[scope] = review(path, settings, train, test, regime, mutator, observations_committed=True)
             except Exception as exc:
@@ -125,10 +128,12 @@ def main():
         from data_ingestor import DataIngestor
         from llm_mutator import LLMMutator
         ingest = DataIngestor(s, None, observation_path=path)
+        from research_admission import MemoryAdmission
+        admission = MemoryAdmission(path)
         mut = LLMMutator(s)
 
         def tick():
-            return research_tick(path, s, ingest, mut)
+            return research_tick(path, s, ingest, mut, admission)
     else:
         from executor import StrategyExecutor, AlpacaPaper
         adapter = StrategyExecutor(path, AlpacaPaper(s), s)
@@ -151,6 +156,9 @@ def main():
             continue
         if args.once:
             return
-        time.sleep(10 if args.role == 'supervise' else seconds_to_next_observation(time.time()))
+        if args.role == 'supervise':
+            time.sleep(10)
+        else:
+            admission.wait(seconds_to_next_observation(time.time()))
 if __name__ == '__main__':
     main()

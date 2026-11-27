@@ -78,10 +78,12 @@ def _add_indicators(df: pd.DataFrame) -> pd.DataFrame:
 class DataIngestor:
     """Handles fetching market data and identifying market regimes."""
 
-    def __init__(self, settings: Settings, memory: MemoryManager):
+    def __init__(self, settings: Settings, memory: MemoryManager, observation_path=None):
         from alpaca.data.historical import StockHistoricalDataClient, CryptoHistoricalDataClient
         self.settings = settings
         self.memory = memory
+        self.observation_path = observation_path
+        self.diagnostics = []
         self.stock_client = StockHistoricalDataClient(
             settings.alpaca.api_key, settings.alpaca.api_secret
         )
@@ -95,7 +97,7 @@ class DataIngestor:
         """Fetches historical bars for a mix of equities and cryptos."""
         from alpaca.data.requests import StockBarsRequest, CryptoBarsRequest
         from alpaca.data.enums import DataFeed
-        equities = [s for s in symbols if s in self.settings.universe.equities]
+        equities = [s for s in symbols if s in self.settings.universe.equities or s in ('SPY', 'QQQ')]
         cryptos = [s for s in symbols if s in self.settings.universe.cryptos]
 
         dfs = []
@@ -139,56 +141,12 @@ class DataIngestor:
         return self.fetch_bars(self.settings.universe.symbols, TimeFrame.Hour, start, end)
 
     def detect_regime(self, df: pd.DataFrame) -> Dict[str, Any]:
-        """
-        Detects the current market regime based on recent price action.
-        Uses a heuristic approach: Trend (Moving Average) + Volatility (ATR/StdDev).
-        """
+        """Report the latest observed equity regime from the frozen SPY anchor."""
+        from regime_detector import point_in_time_regimes
+
         if df.empty:
-            return {"label": "unknown", "indicators": {}}
-
-        # Use the first symbol or an index proxy if available.
-        # For simplicity, we'll average the returns of all symbols to get a "market" view.
-        # In a real system, one might use SPY or BTC as the regime anchor.
-
-        # Reshape to have symbols as columns for easier market averaging
-        pivoted = df.reset_index().pivot(index='timestamp', columns='symbol', values='close')
-        returns = pivoted.pct_change().dropna()
-        market_return = returns.mean(axis=1)
-
-        # Indicators
-        # 1. Trend: 20-period moving average of market returns
-        trend_series = market_return.rolling(window=20).mean()
-        trend = float(trend_series.iloc[-1]) if len(trend_series.dropna()) > 0 else 0.0
-
-        # 2. Volatility: 20-period standard deviation of returns
-        vol_series = market_return.rolling(window=20).std()
-        vol = float(vol_series.iloc[-1]) if len(vol_series.dropna()) > 0 else 0.0
-
-        # 3. Momentum: Last 5 days vs last 20 days
-        short_ma_series = market_return.rolling(window=5).mean()
-        long_ma_series = market_return.rolling(window=20).mean()
-        short_ma = float(short_ma_series.iloc[-1]) if len(short_ma_series.dropna()) > 0 else 0.0
-        long_ma = float(long_ma_series.iloc[-1]) if len(long_ma_series.dropna()) > 0 else 0.0
-
-        indicators = {
-            "trend": float(trend),
-            "volatility": float(vol),
-            "momentum": float(short_ma / long_ma) if long_ma != 0 else 1.0,
-        }
-
-        # Heuristic labeling
-        if trend > 0.001 and vol < 0.01:
-            label = "bull_quiet"
-        elif trend > 0.001 and vol >= 0.01:
-            label = "bull_volatile"
-        elif trend < -0.001 and vol < 0.01:
-            label = "bear_quiet"
-        elif trend < -0.001 and vol >= 0.01:
-            label = "bear_volatile"
-        else:
-            label = "sideways_volatile" if vol >= 0.01 else "sideways_quiet"
-
-        return {"label": label, "indicators": indicators}
+            return {'label': 'unknown', 'indicators': {}}
+        return point_in_time_regimes(df)[1]
 
     def update_market_context(self):
         """Fetches recent data, detects regime, and persists it."""
@@ -206,43 +164,102 @@ class DataIngestor:
             return regime_id
         return None
 
-    def get_train_test_split(self, train_days: int = 60, test_days: int = 14) -> tuple:
-        """
-        Fetch real market data and split into train (older) and test (recent held-out).
+    def _cached_intervals(self, start, end):
+        from paper_store import db
 
-        Train data is used to backtest candidate strategies; test data is held out
-        and used only for out-of-sample validation. This prevents the cheating where
-        a strategy is tested on the same data it was generated for.
+        path = getattr(self, 'observation_path', None)
+        if path is None:
+            return pd.DataFrame()
+        with db(path) as c:
+            rows = pd.read_sql_query(
+                """SELECT symbol,t AS timestamp,o AS open,h AS high,l AS low,c AS close,v AS volume,
+                          interval_start,interval_end,interval_kind,feed,received_at
+                   FROM usable_bars WHERE t BETWEEN ? AND ? AND julianday(received_at)<=julianday(?)
+                     AND interval_kind IN ('XNYS_1m','UTC_1h')""",
+                c, params=(start.isoformat(), end.isoformat(), end.isoformat()))
+        if rows.empty:
+            return rows
+        for col in ('timestamp', 'interval_start', 'interval_end'):
+            rows[col] = pd.to_datetime(rows[col], utc=True, format='ISO8601')
+        return rows.set_index(['symbol', 'timestamp']).sort_index()
 
-        Returns (train_df, test_df) — both multi-index (timestamp, symbol) DataFrames.
-        """
+    def get_train_test_split(self, train_days: int = 60, test_days: int = 14, *, as_of=None) -> tuple:
+        """Construct completed equity and crypto intervals with independent feed failure scopes."""
         from alpaca.data.timeframe import TimeFrame
-        end = datetime.now(timezone.utc)
-        # Start far enough back to cover both train and test windows
-        start = end - timedelta(days=train_days + test_days + 5)
+        from market_time import aggregate_equity_minutes
+        from hourly_features import enrich, validate_raw
 
-        symbols = self.settings.universe.symbols
-        df = self.fetch_bars(symbols, TimeFrame.Hour, start, end)
-
-        if df.empty:
+        end = pd.Timestamp(as_of) if as_of is not None else pd.Timestamp.now(tz='UTC')
+        if end.tz is None:
+            raise ValueError('as_of requires an explicit offset')
+        end = end.tz_convert('UTC')
+        start = (end - pd.Timedelta(days=train_days + test_days + 5)).normalize()
+        cache = self._cached_intervals(start, end)
+        self.diagnostics = []
+        parts = []
+        equities = list(dict.fromkeys([*self.settings.universe.equities, 'SPY', 'QQQ']))
+        for symbols, equity in ((equities, True), (self.settings.universe.cryptos, False)):
+            if not symbols:
+                continue
+            cohort_cache = cache
+            if not cache.empty:
+                cohort_cache = cache.loc[cache.index.get_level_values('symbol').isin(symbols)]
+            cursor = start
+            if not cohort_cache.empty:
+                parts.append(cohort_cache)
+                latest = cohort_cache.reset_index().groupby('symbol').timestamp.max()
+                if all(symbol in latest for symbol in symbols):
+                    cursor = max(start, latest.min().normalize() - pd.Timedelta(days=1))
+            while cursor < end:
+                # Provider SDKs collect paginated results in memory. Bound each minute request.
+                stop = min(cursor + pd.Timedelta(days=3 if equity else 30), end)
+                try:
+                    bars = self.fetch_bars(symbols, TimeFrame.Minute if equity else TimeFrame.Hour,
+                                           cursor.to_pydatetime(), stop.to_pydatetime())
+                except Exception as exc:
+                    self.diagnostics.append({'scope': symbols, 'error': type(exc).__name__,
+                                             'start': cursor.isoformat(), 'end': stop.isoformat()})
+                    break
+                if not bars.empty:
+                    bars = bars.reorder_levels(['symbol', 'timestamp']).sort_index()
+                    timestamps = bars.index.get_level_values('timestamp')
+                    if timestamps.tz is None:
+                        raise ValueError('expected timezone-aware provider bars')
+                    bars = bars.loc[(timestamps >= cursor) & (timestamps < stop)]
+                for symbol in symbols:
+                    if bars.empty or symbol not in bars.index.get_level_values('symbol'):
+                        self.diagnostics.append({'scope': symbol, 'error': 'no_rows', 'start': cursor.isoformat()})
+                        continue
+                    try:
+                        raw = bars.xs(symbol, level='symbol', drop_level=False)
+                        validate_raw(raw)
+                        if equity:
+                            frame = aggregate_equity_minutes(raw, end)
+                        else:
+                            frame = raw.copy()
+                            opening = frame.index.get_level_values('timestamp').tz_convert('UTC')
+                            if (opening != opening.floor('h')).any():
+                                raise ValueError('invalid crypto hourly boundary')
+                            closing = opening + pd.Timedelta(hours=1)
+                            frame['interval_start'], frame['interval_end'] = opening, closing
+                            frame['interval_kind'] = 'UTC_1h'
+                            frame.index = pd.MultiIndex.from_arrays(
+                                [frame.index.get_level_values('symbol'), closing], names=['symbol', 'timestamp'])
+                            frame = frame.loc[closing <= end]
+                        if not frame.empty:
+                            frame = frame.assign(feed='alpaca:iex:raw' if equity else 'alpaca:crypto:us',
+                                                 received_at=pd.Timestamp.now(tz='UTC').isoformat())
+                            parts.append(frame)
+                    except (ValueError, TypeError, KeyError) as exc:
+                        self.diagnostics.append({'scope': symbol, 'error': str(exc)[:120],
+                                                 'start': cursor.isoformat(), 'end': stop.isoformat()})
+                cursor = stop
+        if not parts:
             return pd.DataFrame(), pd.DataFrame()
-
-        # Sort by timestamp to ensure chronological split
-        df = df.reorder_levels(['symbol','timestamp']).sort_index()
-        ts=df.index.get_level_values('timestamp')
-        if ts.tz is None:raise ValueError('expected timezone-aware Alpaca bars')
-        df.index=pd.MultiIndex.from_arrays([df.index.get_level_values('symbol'),ts.tz_convert('UTC')],names=['symbol','timestamp'])
-        df=df.loc[df.index.get_level_values('timestamp')+timedelta(hours=1)<=end]
-        if df.empty:return pd.DataFrame(),pd.DataFrame()
-
-        # Split point: test = last test_days, train = everything before
-        latest_ts = df.index.get_level_values('timestamp').max()
-        split_ts = latest_ts - timedelta(days=test_days)
-
-        train_mask = df.index.get_level_values('timestamp') <= split_ts
-        test_mask = df.index.get_level_values('timestamp') > split_ts
-
-        from hourly_features import enrich
-        frame = enrich(df.loc[df.index.get_level_values('timestamp') + timedelta(hours=1) <= end])
-        ts = frame.index.get_level_values('timestamp')
-        return frame.loc[ts <= split_ts], frame.loc[ts > split_ts]
+        combined = pd.concat(parts)
+        # Cache rows precede freshly received values. Persistence will retain revisions and quarantine conflicts.
+        combined = combined.loc[~combined.index.duplicated(keep='last')].sort_index()
+        frame = enrich(combined)
+        cut = end - pd.Timedelta(days=test_days)
+        times = frame.index.get_level_values('timestamp')
+        return frame.loc[times <= cut], frame.loc[times > cut]

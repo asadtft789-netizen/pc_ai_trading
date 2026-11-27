@@ -1,359 +1,264 @@
-"""Phoenix Multi-Regime Shadow-Tournament Research Engine.
-Each market regime gets its own champion. Challengers run in Shadow Mode
-until they statistically prove superiority on live bars before promotion.
-"""
-import json, math, sqlite3, concurrent.futures
-from datetime import datetime, timezone
+"""Development-only regime reviews with immutable inputs and independent progress."""
+import hashlib
+import json
+from dataclasses import asdict
+from functools import lru_cache
 from pathlib import Path
-import numpy as np
-import pandas as pd
-from paper_store import db, now, key, put, get
-from strategy_worker import SEED, FEATURES
-from hourly_features import signals
-from backtester import Backtester
-from learning_loop import Ledger
-from learning_loop_adapter import UNKNOWN_GATES
-from regime_detector import classify
 
-LEARNING_DB_PATH = Path(__file__).resolve().parent / 'data' / 'learning_loop.sqlite'
+import pandas as pd
+
+from backtester import Backtester
+from hourly_features import ALL_READY, FEATURE_VERSION, feature_column, signals, strategy_flags, validate_raw
+from market_observations import record_observation
+from paper_store import db, key, now, put
+from phoenix_tournament import FOCUSES, run_development
+from research_admission import reserve_lanes
+from review_progress import advance_review, review_marks
+from strategy_worker import SEED
+
 REGIMES = ['trend_up', 'trend_down', 'range_quiet', 'vol_expansion']
 
-FAILURE_PATTERNS = {
-    'counter_trend': {'logic': 'trend == 0', 'guards': ['trend', 'momentum'], 'desc': 'Loss occurred against prevailing EMA trend.'},
-    'low_volume': {'logic': 'volume == 0', 'guards': ['volume'], 'desc': 'Signal lacked relative volume confirmation.'},
-    'overextended': {'logic': 'rsi > 70 or rsi < 30', 'guards': ['golden', 'pullback'], 'desc': 'Entry at RSI extremes without mean reversion.'},
-    'whipsaw': {'logic': 'quiet == 0', 'guards': ['quiet'], 'desc': 'High ATR volatility caused immediate stop-out.'},
-    'resistance_hit': {'logic': 'resistance == 1', 'guards': ['breakout', 'structure'], 'desc': 'Entry into overhead shifted resistance.'},
-    'no_momentum': {'logic': 'momentum == 0', 'guards': ['momentum', 'breakout'], 'desc': 'Signal lacked 5-bar momentum confirmation.'}
-}
+
+def analyze_failure(outcome):
+    """Report observable entry associations, preserving unidentifiable cases."""
+    flags = json.loads(outcome['flags']) if outcome.get('flags') else None
+    causes = []
+    if flags is not None:
+        for flag, expected, label in (
+                ('trend', False, 'counter_trend'), ('volume', False, 'low_volume'),
+                ('quiet', False, 'high_volatility'), ('resistance', True, 'near_resistance'),
+                ('momentum', False, 'no_momentum')):
+            if flags[flag] == expected:
+                causes.append(label)
+    return {'lot': outcome['lot'], 'strategy': outcome['strategy'], 'symbol': outcome['symbol'],
+            'gross': outcome['gross'], 'entry_time': outcome.get('entry_time'),
+            'associations': causes, 'diagnosis': 'hypotheses_only' if flags else 'entry_snapshot_unavailable'}
 
 
-def analyze_failure(outcome, frame):
-    """Diagnose trade failure by inspecting feature states at entry."""
-    try:
-        symbol = outcome['symbol']
-        entry_t = pd.Timestamp(outcome['at'])
-        # Find the entry bar - the decision bar is usually one bar before the outcome at
-        decision_idx = frame.xs(symbol, level='symbol').index.get_indexer([entry_t], method='pad')[0]
-        if decision_idx < 0: return None
-        bar = frame.xs(symbol, level='symbol').iloc[decision_idx]
-
-        causes = []
-        for name, p in FAILURE_PATTERNS.items():
-            # Evaluate logic string against bar values
-            if eval(p['logic'], {}, bar.to_dict()):
-                causes.append({'id': name, 'desc': p['desc'], 'guards': p['guards']})
-
-        return {
-            'symbol': symbol,
-            'at': entry_t.isoformat(),
-            'pnl': float(outcome['gross']),
-            'causes': causes,
-            'features': {f: bool(bar[f]) for f in FEATURES if f in bar}
-        }
-    except Exception:
-        return None
+def compact(metrics):
+    return {k: v for k, v in metrics.items() if k != 'trades'}
 
 
-def compact(m):
-    return {k: v for k, v in m.items() if k != 'trades'}
+def passes(metrics):
+    return (not metrics.get('_reason') and metrics['total_trades'] >= 20
+            and metrics['pnl'] > 0 and metrics['max_drawdown'] > -0.10)
 
 
-def passes(m):
-    return not m.get('_reason') and m['total_trades'] >= 20 and (m['pnl'] > 0) and (m['max_drawdown'] > -0.10)
-
-
-def paired_lower(a, b):
-    """One-sided 90% moving-block bootstrap on paired UTC-day realized PnL differences."""
-    diffs = {}
-    for sign, metrics in ((1, a), (-1, b)):
-        for trade in metrics['trades']:
-            day = pd.Timestamp(trade['exit_time']).normalize()
-            diffs[day] = diffs.get(day, 0.0) + sign * trade['pnl_usd']
-    if len(diffs) < 10:
-        return None
-    days = pd.date_range(min(diffs), max(diffs), freq='D')
-    v = np.array([diffs.get(d, 0.0) for d in days])
-    n = len(v)
-    rng = np.random.default_rng(42)
-    starts = rng.integers(0, n, (500, (n + 2) // 3))
-    idx = (starts[:, :, None] + np.arange(3)) % n
-    return float(np.quantile(v[idx.reshape(500, -1)[:, :n]].mean(axis=1), 0.1))
-
-
-def evaluate(source, guard, frame, settings):
-    """Run backtester on a source/guard combination over a frame."""
-    sig = signals(source, frame)
-    frame = frame.loc[~frame.index.get_level_values('symbol').str.contains('/', regex=False)]
+def evaluate(source, guard, frame, settings, *, scope=None, observed_by_time=None):
+    symbols = frame.index.get_level_values('symbol')
+    eligible = symbols.isin(settings.universe.equities) & ~symbols.isin(['SPY', 'QQQ'])
+    frame = frame.loc[eligible]
+    signal = signals(source, frame)
     if guard:
-        sig = sig.loc[frame.index] & frame[guard].astype(int)
-    else:
-        sig = sig.loc[frame.index]
-    return Backtester(settings).run(None, frame.assign(signal=sig))
+        signal &= frame[feature_column(guard)].astype(int)
+    if scope is not None:
+        routing = observed_by_time or {}
+        timestamps = frame.index.get_level_values('timestamp')
+        eligible_regime = [routing.get(t.isoformat(), 'unknown') == scope and scope in REGIMES
+                           for t in timestamps]
+        signal = signal.where(eligible_regime, 0)
+    if 'interval_start' in frame:
+        full_hour = frame.interval_end - frame.interval_start == pd.Timedelta(hours=1)
+        signal = signal.where(full_hour, 0)
+    return Backtester(settings).run(None, frame.assign(signal=signal))
 
 
 def get_champion_for_regime(c, regime_label):
-    """Fetch current champion for a regime, falling back to global champion."""
-    row = c.execute(
-        "select * from strategies where status='champion' and regime=?",
-        (regime_label,)
-    ).fetchone()
-    if not row:
-        row = c.execute(
-            "select * from strategies where status='champion' and regime IS NULL"
-        ).fetchone()
-    return row
+    return c.execute("""SELECT * FROM strategies WHERE status='champion' AND (regime=? OR regime IS NULL)
+                        ORDER BY regime IS NULL, id LIMIT 1""", (regime_label,)).fetchone()
 
 
-def review(path, s, train, test, regime, mutator):
-    """Phoenix review: per-regime champion evaluation + shadow tournament."""
+def ingest_observations(path, train, test):
+    """Commit raw observations separately from optional research work in bounded batches."""
+    if not train.empty and not test.empty:
+        if train.index.get_level_values('timestamp').max() >= test.index.get_level_values('timestamp').min():
+            raise ValueError('overlapping development windows')
+    for frame in (train, test):
+        if frame.empty:
+            continue
+        validate_raw(frame)
+        times = frame.index.get_level_values('timestamp')
+        if times.tz is None or times.hasnans:
+            raise ValueError('expected offset-aware timestamps')
+        for offset in range(0, len(frame), 250):
+            with db(path, True) as c:
+                slice_ = frame.iloc[offset:offset + 250]
+                for (symbol, t), row in slice_.iterrows():
+                    ts = t.tz_convert('UTC').isoformat()
+                    record_observation(c, symbol, ts, row)
+                for symbol, group in slice_.groupby(level='symbol'):
+                    latest = group.index.get_level_values('timestamp').max().tz_convert('UTC').isoformat()
+                    c.execute("""INSERT INTO watermarks(symbol,t) VALUES(?,?)
+                        ON CONFLICT(symbol) DO UPDATE SET t=excluded.t WHERE excluded.t > watermarks.t""",
+                              (symbol, latest))
+
+
+@lru_cache(maxsize=1)
+def _implementation_digest():
+    source = hashlib.sha256()
+    for name in ('research.py', 'hourly_features.py', 'backtester.py', 'strategy_worker.py'):
+        source.update(Path(__file__).with_name(name).read_bytes())
+    return source.hexdigest()
+
+
+def _input_digest(frame):
+    h = hashlib.sha256()
+    h.update(json.dumps(list(frame.columns)).encode())
+    # Receipt times can vary on an identical download. The original receipts remain in bar_versions.
+    columns = [c for c in frame if c != 'received_at']
+    h.update(pd.util.hash_pandas_object(frame[columns], index=True).to_numpy().tobytes())
+    return h.hexdigest()
+
+
+def _entry_evidence(c):
+    return [dict(r) for r in c.execute("""SELECT o.lot,o.strategy,o.symbol,sum(o.gross) gross,max(o.at) exit_at,
+              snap.flags,snap.t AS entry_time,snap.regime FROM outcomes o
+              JOIN lots l ON l.id=o.lot AND cast(l.qty AS REAL)=0
+              LEFT JOIN decision_snapshots snap ON snap.lot=o.lot AND snap.strategy=o.strategy
+                AND snap.symbol=o.symbol AND EXISTS (
+                    SELECT 1 FROM intents i WHERE i.lot=o.lot AND i.symbol=o.symbol
+                    AND i.strategy=o.strategy AND i.side='buy')
+              GROUP BY o.lot,o.strategy,o.symbol ORDER BY exit_at DESC LIMIT 30""")]
+
+
+def _persist_decisions(c, scope, data, newer, regime, champion, settings, sig):
+    observations = regime.get('observed_by_time', {})
+    latest = data.index.get_level_values('timestamp').max().isoformat()
+    eligible = set(settings.universe.equities) - {'SPY', 'QQQ'}
+    indices = [(sym, t) for sym, t in newer if sym in eligible]
+    if not indices:
+        return
+    if champion:
+        guard = feature_column(json.loads(champion['rule_ids'])[0])
+    for sym, t in indices:
+        ts = t.isoformat()
+        observed = observations.get(ts, regime.get('observed_regime', 'unknown') if ts == latest else 'unknown')
+        if observed != scope or observed not in REGIMES:
+            continue
+        row = data.loc[sym, t]
+        if champion and ts <= champion['born']:
+            continue
+        if c.execute("SELECT 1 FROM decisions WHERE symbol=? AND t=?", (sym, ts)).fetchone():
+            continue
+        flags = strategy_flags(row)
+        full = row.get('interval_kind') == 'XNYS_1m' and row.interval_end - row.interval_start == pd.Timedelta(hours=1)
+        fact = c.execute("SELECT received_at,content_hash FROM usable_bars WHERE symbol=? AND t=?",
+                         (sym, ts)).fetchone()
+        received = pd.Timestamp(fact['received_at']) if fact and fact['received_at'] else None
+        timely = (received is not None and 0 <= (received - t).total_seconds() <= 120
+                  and 0 <= (pd.Timestamp(now()) - received).total_seconds() <= 30)
+        target = int(sig.loc[sym, t] and row[guard]) if champion and flags and full and timely else None
+        sid = champion['id'] if champion else None
+        c.execute("""INSERT INTO decisions(symbol,t,strategy,target,atr,regime) VALUES(?,?,?,?,?,?)""",
+                  (sym, ts, sid, target, float(row.atr) if pd.notna(row.atr) else None, observed))
+        if champion:
+            c.execute("""INSERT INTO decision_snapshots(symbol,t,strategy,lot,regime,feature_version,
+                          readiness_mask,history_ready,flags,rsi,received_at,content_hash)
+                          SELECT ?,?,?,?,?,?,?,?,?,?,received_at,content_hash FROM usable_bars
+                          WHERE symbol=? AND t=? AND content_hash IS NOT NULL""",
+                      (sym, ts, sid, key('lot', sym, ts), observed, FEATURE_VERSION, int(row.readiness_mask),
+                       int(row.history_ready), json.dumps(flags) if flags is not None else None,
+                       float(row.rsi) if pd.notna(row.rsi) else None, sym, ts))
+
+
+def review(path, s, train, test, regime, mutator, *, observations_committed=False):
+    if not observations_committed:
+        ingest_observations(path, train, test)
     if train.empty or test.empty:
         return 'insufficient history'
+    scope = regime['label']
     data = pd.concat([train, test]).sort_index()
     times = data.index.get_level_values('timestamp')
     cut = times.max().isoformat()
-    bt = Backtester(s)
+    with db(path) as c:
+        marks = review_marks(c, scope)
+        quarantined = {r[0] for r in c.execute(
+            'SELECT DISTINCT symbol FROM bar_quarantine WHERE t BETWEEN ? AND ?',
+            (times.min().isoformat(), cut))}
+        champion = get_champion_for_regime(c, scope)
+        exits = _entry_evidence(c)
+        lessons = [r[0] for r in c.execute('SELECT lesson FROM lessons ORDER BY created_at DESC LIMIT 12')]
     if data.index.has_duplicates or train.index.get_level_values('timestamp').max() >= test.index.get_level_values('timestamp').min():
         raise ValueError('overlap or duplicate bar')
-
-    regime_label = regime['label']
-
-    with db(path) as c:
-        marks = dict(c.execute('select symbol,t from watermarks'))
-        champ = get_champion_for_regime(c, regime_label)
-        child = c.execute(
-            "select * from strategies where status='challenger' and regime=?",
-            (regime_label,)
-        ).fetchone()
-        if not child:
-            child = c.execute(
-                "select * from strategies where status='challenger' and regime IS NULL"
-            ).fetchone()
-        evidence = [dict(r) for r in c.execute(
-            'select symbol,gross,at,strategy from outcomes order by at desc limit 30')]
-        rules = [dict(r) for r in c.execute(
-            'select text,state,feature from rules order by created_at desc limit 30')]
-        last_trial = c.execute(
-            'select phase,metrics from trials order by cut desc limit 1'
-        ).fetchone()
-        lessons = [r[0] for r in c.execute(
-            'select lesson from lessons order by created_at desc limit 12')]
-        serial = c.execute('select count(*) from strategies').fetchone()[0]
-
-    # --- Data integrity checks ---
-    for sym, start in data.groupby(level='symbol').apply(
-        lambda g: g.index.get_level_values('timestamp').min()).items():
-        if sym in marks and pd.Timestamp(marks[sym]) < start:
-            raise ValueError('history gap exceeds retrieval window; backfill required')
-    newer = [(sym, t) for sym, t in data.index if t.isoformat() > marks.get(sym, '')]
+    data = data.loc[~data.index.get_level_values('symbol').isin(quarantined)]
+    if data.empty:
+        with db(path, True) as c:
+            put(c, 'research_diagnostic_' + scope, 'all_symbols_quarantined')
+        return 'all symbols quarantined'
+    train = train.loc[~train.index.get_level_values('symbol').isin(quarantined)]
+    test = test.loc[~test.index.get_level_values('symbol').isin(quarantined)]
+    newer = [(sym, t) for sym, t in data.index if sym not in marks or t > pd.Timestamp(marks[sym])]
     if not newer:
         return 'no new completed bar'
+    evidence = dict(regime=scope, parent=champion['source'] if champion else SEED,
+                    confirmed_paper_exits=exits, attributed_lessons=lessons,
+                    failure_analysis=[analyze_failure(e) for e in exits if e['gross'] < 0])
+    protocol = dict(scope=scope, parent=champion['id'] if champion else None, features=FEATURE_VERSION,
+                    implementation=_implementation_digest(), cost_and_risk=asdict(s.risk),
+                    symbols=sorted(set(s.universe.equities) - {'SPY', 'QQQ'}),
+                    train=_input_digest(train), validation=_input_digest(test), end=cut,
+                    evaluation='historical-development-only-v1')
+    trial_ids = {}
 
-    # --- Incumbent gate ---
-    gate = None
-    incumbent_ok = False
-    if champ:
-        gate = evaluate(champ['source'], json.loads(champ['rule_ids'])[0], test, s)
-        incumbent_ok = bool(passes(gate))
+    def evaluate_train(source, guard):
+        manifest = json.dumps(dict(protocol, source=source, guard=guard), sort_keys=True, allow_nan=False)
+        ident = hashlib.sha256(manifest.encode()).hexdigest()
+        with db(path, True) as c:
+            c.execute("""INSERT INTO development_manifests(id,manifest,registered_at) VALUES(?,?,?)
+                         ON CONFLICT(id) DO NOTHING""", (ident, manifest, now()))
+        trial_ids[source, guard] = ident
+        return evaluate(source, guard, train, s, scope=scope, observed_by_time=regime.get('observed_by_time'))
 
-    action = None
-    trial = None
-    ablate = None
-    control = None
-    proposal = None
-    reason = ''
-    rule_state = None
-    hold = None
-
-    if child:
-        # --- Shadow Tournament: Challenger vs Incumbent ---
-        future = data.loc[times > pd.Timestamp(child['born'])]
-        days = future.index.get_level_values('timestamp').normalize().unique()
-        guard = json.loads(child['rule_ids'])[0]
-        if len(days) >= 15:
-            trial = evaluate(child['source'], guard, future, s)
-            ablate = evaluate(child['source'], None, future, s)
-            control = evaluate(champ['source'], json.loads(champ['rule_ids'])[0], future, s) if champ else bt._empty_metrics('cash')
-            buckets = np.array_split(days.sort_values(), 3)
-            paired = []
-            for dayslice in buckets:
-                f = future.loc[future.index.get_level_values('timestamp').normalize().isin(dayslice)]
-                m = evaluate(child['source'], guard, f, s)
-                a = evaluate(child['source'], None, f, s)
-                inc = evaluate(champ['source'], json.loads(champ['rule_ids'])[0], f, s) if champ else bt._empty_metrics('cash')
-                paired.append((m['total_trades'] >= 3, m['pnl'] - a['pnl'], m['pnl'] - max(0, inc['pnl'])))
-            enough = all((x[0] for x in paired)) and trial['total_trades'] >= 20
-            lower = paired_lower(trial, ablate)
-            rule_state = ('supported' if enough and lower is not None and (lower > 0)
-                          and all((x[1] > 0 for x in paired))
-                          else 'harmful' if enough and all((x[1] < 0 for x in paired))
-                          else 'inconclusive')
-
-            halted = False
-            try:
-                led = Ledger(LEARNING_DB_PATH)
-                halted = bool(led.state().get('halted'))
-                led.close()
-            except Exception:
-                halted = True
-
-            # Phoenix promotion requires statistical superiority over incumbent;
-            # with no incumbent yet, the incumbent-comparison is vacuously true.
-            beats_incumbent = (not champ) or (
-                all((x[2] > 0 for x in paired)) and trial['max_drawdown'] >= control['max_drawdown'])
-            action = ('champion' if passes(trial) and rule_state == 'supported'
-                      and beats_incumbent and not halted else 'retired')
-            reason = json.dumps(dict(blocks=paired, guard_lower_90=lower, rule=rule_state,
-                                     attribution='paired guard ablation; not a significance claim'))
+    incumbent = (champion['source'], json.loads(champion['rule_ids'])[0]) if champion else None
+    if reserve_lanes(path, len(FOCUSES)):
+        winner, records = run_development(mutator, evidence, evaluate_train, passes, incumbent=incumbent)
     else:
-        # --- Candidate Generation: build new challenger ---
-        evidence_obj = dict(
-            parent=champ['source'] if champ else SEED,
-            confirmed_paper_exits=evidence,
-            attributed_lessons=lessons,
-            rules=rules,
-            previous_test=dict(last_trial) if last_trial else None,
-            regime=regime_label,
-            failure_analysis=[analyze_failure(e, data) for e in evidence if e['gross'] < 0]
-        )
-
-        # Parallel candidate generation
-        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-            futures = [executor.submit(mutator.propose, evidence_obj) for _ in range(5)]
-            proposals = [f.result() for f in concurrent.futures.as_completed(futures) if isinstance(f.result(), dict)]
-
-        repair = bool(champ and any(
-            r['state'] == 'review' and r['feature'] == json.loads(champ['rule_ids'])[0]
-            for r in rules))
-
-        # Select best proposal based on brief backtest
-        proposal = None
-        if proposals:
-            best_trial = None
-            for p in proposals:
-                trial = evaluate(p['source'], p['guard'], train, s)
-                if passes(trial) and (not best_trial or trial['pnl'] > best_trial['pnl']):
-                    best_trial = trial
-                    proposal = p
-
-        if not proposal: # Fallback
-            proposal = dict(
-                source=champ['source'] if champ else SEED,
-                name=f'Hourly {regime_label} challenger',
-                guard=FEATURES[(serial + 5) % len(FEATURES)],
-                lesson=f'Test one causal guard for {regime_label} regime.'
-            )
-
-        halted = False
-        try:
-            led = Ledger(LEARNING_DB_PATH)
-            halted = bool(led.state().get('halted'))
-            led.close()
-        except Exception:
-            halted = True
-
-        if not halted and not repair and champ:
-            proposal['source'] = champ['source']
-        elif halted:
-            proposal = None
-
-        # Final logic after candidate generation
-        if not proposal and evidence_obj['failure_analysis']:
-            # Record first failure for human review if AI cannot repair
-            f = evidence_obj['failure_analysis'][0]
-            if f:
-                with db(path, True) as c:
-                    from paper_store import record_unsolved_failure
-                    record_unsolved_failure(c, 'unsolved', f['symbol'], regime_label, champ['id'] if champ else 'SEED', f['pnl'], f['causes'][0]['desc'] if f['causes'] else 'unknown', 'AI_mutation_failed')
-
-        if proposal:
-            trial = evaluate(proposal['source'], proposal['guard'], train, s) if proposal is not None else None
-            hold = evaluate(proposal['source'], proposal['guard'], test, s) if proposal is not None else None
-            action = 'challenger' if proposal and passes(trial) and passes(hold) else 'retired'
-
-    incumbent_sig = (
-        signals(champ['source'], data) & data[json.loads(champ['rule_ids'])[0]].astype(int)
-        if champ else None
-    )
-
+        winner, records = None, [{"status": "waiting", "reason": "daily_variant_budget"}]
+    validation = evaluate(winner['source'], winner['guard'], test, s, scope=scope,
+                          observed_by_time=regime.get('observed_by_time')) if winner else None
+    # Evaluate strategy code outside operational write transactions.
+    decision_signals = None
+    if champion:
+        decision_signals = signals(champion['source'], data)
     with db(path, True) as c:
-        if dict(c.execute('select symbol,t from watermarks')) != marks:
+        if review_marks(c, scope) != marks:
             return 'concurrent review already committed'
-        max_by_symbol = {
-            s: data.xs(s).index[-1].isoformat()
-            for s in data.index.get_level_values('symbol').unique()
-        }
-        if gate is not None:
-            c.execute(
-                'insert or replace into trials values(?,?,?,?)',
-                (champ['id'], cut, 'hourly_monitor', json.dumps(compact(gate)))
-            )
-        # Entry gate per regime: open only if incumbent passes
-        put(c, f'entry_gate_{regime_label}', champ['id'] if incumbent_ok else 'closed')
-        for sym, t in newer:
-            r = data.loc[sym, t]
-            ts = t.isoformat()
-            vals = [float(r[k]) for k in ('open', 'high', 'low', 'close', 'volume')]
-            o, h, l, cl, v = vals
-            if not all(map(math.isfinite, vals)) or min(o, l, cl) <= 0 or \
-               (not l <= min(o, cl) <= max(o, cl) <= h) or (v < 0):
-                raise ValueError('invalid OHLCV')
-            c.execute(
-                'insert into bars values(?,?,?,?,?,?,?)', (sym, ts, *vals))
-            target = int(incumbent_sig.loc[sym, t]) if champ else 0
-            if ts == max_by_symbol[sym] or (champ and get(c, 'champion_since') and ts >= get(c, 'champion_since')):
-                c.execute(
-                    'insert into decisions values(?,?,?,?,?,?)',
-                    (sym, ts, champ['id'] if champ else None,
-                     target if champ else None,
-                     float(r.atr) if pd.notna(r.atr) else None, regime_label))
-            c.execute('insert or replace into watermarks values(?,?)', (sym, ts))
-
-        c.execute(
-            'insert or replace into regimes values(?,?,?)',
-            (cut, regime_label, json.dumps(regime['indicators'], allow_nan=False)))
-
-        if proposal:
-            rid = key('rule', serial, proposal['guard'])
-            sid = key('strategy', serial, proposal['source'], proposal['guard'])
-            parent = champ['id'] if champ else None
-            c.execute(
-                'insert into rules values(?,?,?,?,?,?)',
-                (rid, proposal['lesson'], proposal['guard'],
-                 'testing' if action == 'challenger' else 'unvalidated', now(),
-                 json.loads(champ['rule_ids'])[1] if repair else None))
-            c.execute(
-                'insert into strategies values(?,?,?,?,?,?,?,?,?)',
-                (sid, proposal['name'], proposal['source'],
-                 json.dumps([proposal['guard'], rid]), parent, serial,
-                 action, regime_label, max(cut, now())))
-            reason = f'Historical train and held-out gates: {action}'
-            for phase, m in [('train', trial), ('held_out', hold)]:
-                c.execute(
-                    'insert into trials values(?,?,?,?)',
-                    (sid, cut, phase, json.dumps(compact(m))))
-        elif action:
-            sid = child['id']
-            rid = json.loads(child['rule_ids'])[1]
-            c.execute('update rules set state=? where id=?', (rule_state, rid))
-            if action == 'champion':
-                put(c, 'champion_since', now())
-            if action == 'champion' and champ:
-                c.execute("update strategies set status='retired' where id=?", (champ['id'],))
-            c.execute('update strategies set status=? where id=?', (action, sid))
-            c.execute(
-                'insert into trials values(?,?,?,?)',
-                (sid, cut, 'forward',
-                 json.dumps(dict(candidate=compact(trial),
-                                 without_guard=compact(ablate),
-                                 incumbent=compact(control)))))
-        if action:
-            c.execute(
-                'insert into reflections values(?,?,?,?)',
-                (key('review', cut, sid), sid, reason, now()))
-            c.execute(
-                'insert into reflections values(?,?,?,?)',
-                (key('rule-review', cut, rid), rid, reason, now()))
+        current = get_champion_for_regime(c, scope)
+        if (current['id'] if current else None) != protocol['parent']:
+            return 'routing changed during review'
+        c.execute("INSERT INTO development_batches(consumer,cut,results) VALUES(?,?,?)",
+                  (scope, cut, json.dumps(records, allow_nan=False)))
+        if winner:
+            sid = trial_ids[winner['source'], winner['guard']]
+            rid = key('development_rule', sid)
+            result = ('inconclusive' if validation['total_trades'] < 20 else
+                      'development' if passes(validation) else 'rejected')
+            c.execute("""INSERT INTO rules(id,text,feature,state,created_at,parent) VALUES(?,?,?,?,?,NULL)""",
+                      (rid, winner['lesson'], winner['guard'], 'hypothesis', now()))
+            c.execute("""INSERT INTO strategies(id,name,source,rule_ids,parent_id,generation,status,regime,born)
+                         VALUES(?,?,?,?,?,?,?,?,?)""", (sid, winner['name'], winner['source'],
+                      json.dumps([winner['guard'], rid]), protocol['parent'],
+                      (champion['generation'] + 1) if champion else 1, result, scope, now()))
+            c.execute("INSERT INTO trials(strategy,cut,phase,metrics) VALUES(?,?,?,?)",
+                      (sid, cut, 'development_validation', json.dumps(compact(validation), allow_nan=False)))
+        if not winner:
+            from paper_store import record_unsolved_failure
+            for loss in evidence['failure_analysis']:
+                # One incident per lot/evidence set, even when multiple regime consumers observe it.
+                if c.execute('SELECT 1 FROM unsolved_failures WHERE lot=? AND strategy=?',
+                             (loss['lot'], loss['strategy'])).fetchone() is None:
+                    record_unsolved_failure(c, loss['lot'], loss['symbol'], 'unknown', loss['strategy'],
+                                            loss['gross'], loss['diagnosis'], json.dumps(loss))
+        _persist_decisions(c, scope, data, newer, regime, champion, s, decision_signals)
+        for symbol, group in data.groupby(level='symbol'):
+            latest = group.index.get_level_values('timestamp').max()
+            if symbol not in marks or latest > pd.Timestamp(marks[symbol]):
+                advance_review(c, scope, symbol, latest.isoformat())
+        actual = regime.get('observed_regime', 'unknown')
+        c.execute("""INSERT INTO regimes(t,label,indicators) VALUES(?,?,?) ON CONFLICT(t) DO NOTHING""",
+                  (cut, actual if actual in REGIMES else 'unknown', json.dumps(regime['indicators'], allow_nan=False)))
         put(c, 'research_at', now())
+        put(c, 'research_diagnostic_' + scope, json.dumps({'quarantined': sorted(quarantined),
+            'unready': int((~data.history_ready | data.readiness_mask.ne(ALL_READY)).sum()), 'rows': len(data)}))
         put(c, 'mode', 'PAPER')
-    return f'hour recorded [{regime_label}]'
+    return f'hour recorded [{scope}]'

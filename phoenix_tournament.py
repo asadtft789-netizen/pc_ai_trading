@@ -24,7 +24,7 @@ def generate(mutator, evidence):
     """Parallel network requests; isolated evidence; deterministic result order."""
     proposals = []
     errors = []
-    with ThreadPoolExecutor(max_workers=len(FOCUSES)) as pool:
+    with ThreadPoolExecutor(max_workers=2) as pool:
         jobs = {}
         for i, focus in enumerate(FOCUSES):
             context = deepcopy(evidence)
@@ -67,7 +67,8 @@ def screen(proposals, evaluate, passes, *, incumbent=None, preserve_source=None)
             seen.add(fp)
             m = evaluate(p['source'], p['guard'])
             ok = bool(passes(m))
-            records.append({'candidate': i, 'status': 'passed' if ok else 'rejected',
+            status = 'inconclusive' if m['total_trades'] < 20 else 'rejected'
+            records.append({'candidate': i, 'status': 'passed' if ok else status,
                             'pnl': float(m['pnl']), 'trades': int(m['total_trades']),
                             'drawdown': float(m['max_drawdown']),
                             'model': p.get('provider_model', 'unknown')})
@@ -79,3 +80,12 @@ def screen(proposals, evaluate, passes, *, incumbent=None, preserve_source=None)
             records.append({'candidate': i, 'status': 'error',
                             'error': type(exc).__name__})
     return (best[1] if best else None), records
+
+
+def run_development(mutator, evidence, evaluate, passes, *, incumbent=None):
+    """Screen isolated proposals on a single evaluator, preserving per-lane failures."""
+    proposals, errors = generate(mutator, evidence)
+    winner, records = screen(proposals, evaluate, passes, incumbent=incumbent)
+    for lane, error in errors:
+        records.append({'candidate': lane, 'status': 'unavailable', 'reason': error})
+    return winner, sorted(records, key=lambda record: record['candidate'])
