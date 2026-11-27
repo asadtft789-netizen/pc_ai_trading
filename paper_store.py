@@ -4,6 +4,10 @@ from contextlib import contextmanager, closing
 from datetime import datetime, timezone
 from decimal import Decimal as D
 from pathlib import Path
+from uuid import uuid4
+from sqlite_snapshot import copy_verified
+
+SCHEMA_VERSION = 2
 
 def now():
     return datetime.now(timezone.utc).isoformat(timespec='microseconds')
@@ -42,13 +46,21 @@ def init(path):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with closing(sqlite3.connect(path, timeout=10, isolation_level=None)) as c:
-        c.execute('PRAGMA journal_mode=WAL')
+        c.execute('PRAGMA foreign_keys=ON')
+        c.execute('PRAGMA trusted_schema=OFF')
         c.execute('BEGIN IMMEDIATE')
         with c:
             tables = {r[0] for r in c.execute("select name from sqlite_master where type='table'")}
+            version = c.execute('PRAGMA user_version').fetchone()[0]
+            if version not in (0, SCHEMA_VERSION):
+                raise ValueError('unsupported operational schema version')
             if tables:
                 if 'meta' not in tables or c.execute("select v from meta where k='schema'").fetchone() != ('hourly-paper-1',):
                     raise ValueError('use a separate new operational database')
+                if version == 0:
+                    # BEGIN IMMEDIATE fences competing migrations. A second read connection
+                    # sees the committed state preceding any schema changes.
+                    copy_verified(path, path.parent / 'backups' / f'{path.name}.pre-v2-{uuid4().hex}.sqlite')
                 cols = {r[1] for r in c.execute("PRAGMA table_info(strategies)")}
                 if 'regime' not in cols:
                     c.execute("ALTER TABLE strategies ADD COLUMN regime TEXT")
@@ -66,8 +78,30 @@ def init(path):
                 for sql in SCHEMA.split(';'):
                     if sql.strip():
                         c.execute(sql)
-                c.execute("insert into meta values ('schema','hourly-paper-1')")
-                c.execute("insert into meta values ('since',?)", (now(),))
+                c.execute("insert into meta(k,v) values ('schema','hourly-paper-1')")
+                c.execute("insert into meta(k,v) values ('since',?)", (now(),))
+            if version == 0:
+                c.execute("""CREATE TABLE development_batches(
+                    consumer TEXT NOT NULL, cut TEXT NOT NULL, results TEXT NOT NULL,
+                    PRIMARY KEY(consumer,cut))""")
+                c.execute("""CREATE TABLE strategy_migration_incidents(
+                    strategy TEXT PRIMARY KEY, original_born TEXT, original_regime TEXT,
+                    detected_at TEXT NOT NULL, reason TEXT NOT NULL)""")
+                # Old positional INSERTs could put the campaign timestamp in regime.
+                # Preserve the ambiguous original values for independent reconstruction.
+                for sid, born, regime in c.execute('SELECT id,born,regime FROM strategies'):
+                    try:
+                        stamp(born)
+                    except (ValueError, TypeError):
+                        c.execute("""INSERT INTO strategy_migration_incidents
+                            (strategy,original_born,original_regime,detected_at,reason)
+                            VALUES(?,?,?,?,?)""", (sid,born,regime,now(),'invalid_strategy_birth'))
+                        put(c, 'integrity_entries_paused', 'YES')
+                from market_observations import install_observation_contract
+                install_observation_contract(c)
+                c.execute(f'PRAGMA user_version={SCHEMA_VERSION}')
+        if c.execute('PRAGMA journal_mode=WAL').fetchone()[0] != 'wal':
+            raise RuntimeError('operational store requires WAL')
     return path
 
 def record_unsolved_failure(c, lot, symbol, regime, strategy, pnl, cause, report):
@@ -79,12 +113,12 @@ def record_unsolved_failure(c, lot, symbol, regime, strategy, pnl, cause, report
     if row:
         c.execute('update unsolved_failures set attempts=attempts+1, report=? where id=?', (report, fid))
     else:
-        c.execute('insert into unsolved_failures values(?,?,?,?,?,?,?,?,?,?,?)',
+        c.execute('insert into unsolved_failures(id,lot,symbol,regime,strategy,pnl,cause,attempts,status,created_at,report) values(?,?,?,?,?,?,?,?,?,?,?)',
                   (fid, lot, symbol, regime, strategy, pnl, cause, 1, 'queued_for_human', now(), report))
 
 
 def put(c, k, v):
-    c.execute('insert into meta values(?,?) on conflict(k) do update set v=excluded.v', (k, str(v)))
+    c.execute('insert into meta(k,v) values(?,?) on conflict(k) do update set v=excluded.v', (k, str(v)))
 
 def get(c, k, fallback=None):
     row = c.execute('select v from meta where k=?', (k,)).fetchone()
@@ -95,19 +129,26 @@ def rebuild(c):
     c.execute('delete from outcomes')
     c.execute('delete from lots')
     lots = {}
+    owners = {}
     for r in c.execute("select f.*,i.side,i.lot,i.symbol,i.strategy,i.stop_gap from fills f join intents i on i.id=f.intent order by at,case side when 'buy' then 0 else 1 end,f.id"):
         q, p = (amt(r['qty'], True), amt(r['price'], True))
         lot = r['lot']
         held, basis, at = lots.get(lot, (D(0), D(0), r['at']))
         if r['side'] == 'buy':
+            owner = (r['symbol'], r['strategy'], r['stop_gap'])
+            if owners.setdefault(lot, owner) != owner:
+                raise ValueError('entry identity or protection changed within lot')
             held += q
             basis += p * q
-        else:
-            if q > held:
+        elif r['side'] == 'sell':
+            if q > held or owners[lot][0] != r['symbol']:
                 raise ValueError('exit has no matched entry')
             cost = basis if q == held else q * basis / held
-            c.execute('insert into outcomes values(?,?,?,?,?,?,?,?,?)', (r['id'], lot, r['strategy'], r['symbol'], str(q), float(cost / q), float(p), float(p * q - cost), r['at']))
+            c.execute('insert into outcomes(id,lot,strategy,symbol,qty,entry,exit,gross,at) values(?,?,?,?,?,?,?,?,?)', (r['id'], lot, owners[lot][1], r['symbol'], str(q), float(cost / q), float(p), float(p * q - cost), r['at']))
             held -= q
             basis -= cost
+        else:
+            raise ValueError('invalid order side')
         lots[lot] = (held, basis, at)
-        c.execute('insert or replace into lots values(?,?,?,?,?,?,?)', (lot, r['symbol'], r['strategy'], str(held), str(basis), at, r['stop_gap']))
+        symbol, strategy, gap = owners[lot]
+        c.execute('insert or replace into lots(id,symbol,strategy,qty,basis,opened,gap) values(?,?,?,?,?,?,?)', (lot, symbol, strategy, str(held), str(basis), at, gap))
