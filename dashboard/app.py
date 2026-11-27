@@ -41,7 +41,7 @@ def handler(name):
     def read():
         return view(name)
     return read
-for name in ['metrics', 'strategy', 'regime', 'rules', 'equity-curve', 'mode', 'health', 'hourly', 'symbols']:
+for name in ['metrics', 'strategy', 'strategies', 'regime', 'rules', 'equity-curve', 'mode', 'health', 'hourly', 'symbols']:
     app.add_api_route('/api/' + name, handler(name), methods=['GET'])
 if __name__ == '__main__':
     import uvicorn

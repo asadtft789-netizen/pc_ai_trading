@@ -1,4 +1,6 @@
 #!/bin/bash
+printf "%s\n" "Legacy deployment disabled. See DEPLOYMENT.md for release gates." >&2
+exit 78
 # Pull the project straight from GitHub and start the trader.
 #
 # Pterodactyl startup command:

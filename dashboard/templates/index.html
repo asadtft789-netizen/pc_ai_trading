@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Self-Evolving Trading AI — Dashboard</title>
+<title>Project Phoenix | Paper operations</title>
 <link rel="stylesheet" href="/static/style.css">
 <script src="/assets/plotly.js"></script>
 </head>
@@ -14,7 +14,7 @@
   <aside class="sidebar">
     <div class="brand">
       <div class="brand-mark">AI</div>
-      <div class="brand-name">Self-Evolving Trader</div>
+      <div class="brand-name">Project Phoenix</div>
     </div>
     <nav class="nav">
       <a href="#" class="nav-item active" data-page="overview">Overview</a>
@@ -36,12 +36,13 @@
   <!-- Main content -->
   <main class="main">
     <header class="app-header"><div role="status" id="syncState">Waiting for database</div>
-      <h1>Trading AI Dashboard</h1>
+      <h1>Paper trading operations</h1>
       <p class="subtitle">Dedicated paper account · confirmed gross realized PnL, before fees</p>
     </header>
 
     <!-- Overview page -->
     <section id="page-overview" class="page active">
+      <section class="panel"><h2>Operational health</h2><dl id="operationalHealth" class="health-readings"></dl></section>
       <!-- KPI row -->
       <div class="kpi-grid">
         <div class="kpi-card">
@@ -78,10 +79,8 @@
           <div class="regime-details" id="regimeDetails"></div>
         </div>
         <div class="panel">
-          <div class="panel-title">Active Strategy</div>
-          <div class="strategy-id" id="strategyId">—</div>
-          <div class="strategy-name" id="strategyName">—</div>
-          <div class="strategy-meta" id="strategyMeta">—</div>
+          <div class="panel-title">Registered strategies by scope</div>
+          <ul id="strategyList"></ul>
         </div>
       </div>
 
@@ -100,21 +99,21 @@
       <!-- Observation accuracy -->
       <div class="two-col">
         <div class="panel">
-          <div class="panel-title">Observation Accuracy</div>
+          <div class="panel-title">Closed lot outcomes</div>
           <div class="acc-row">
             <div class="acc-item">
-              <div class="acc-label">Correct</div>
+              <div class="acc-label">Profitable</div>
               <div class="acc-value acc-correct" id="accCorrect">0</div>
             </div>
             <div class="acc-item">
-              <div class="acc-label">Wrong</div>
+              <div class="acc-label">Unprofitable</div>
               <div class="acc-value acc-wrong" id="accWrong">0</div>
             </div>
           </div>
         </div>
       </div>
 
-      <section class="panel full-width"><h2>Hourly results · UTC</h2><p>Counts use completed lots. Gross PnL includes partial exits. Scenario deducts 10 basis points on each side at the paper execution prices; it is not live profit.</p><div class="table-wrap"><table class="data-table"><thead><tr><th>UTC hour</th><th>Closed</th><th>Wins / losses</th><th>Win rate</th><th>Direction accuracy</th><th>Lessons</th><th>Gross PnL</th><th>Cost scenario</th></tr></thead><tbody id="hourlyRows"></tbody></table></div></section>
+      <section class="panel full-width"><h2>Hourly results · UTC</h2><p>Counts use completed lots. Gross PnL includes partial exits. Scenario deducts 10 basis points on each side at the paper execution prices; the result is hypothetical.</p><div class="table-wrap"><table class="data-table"><thead><tr><th>UTC hour</th><th>Closed</th><th>Wins / losses</th><th>Win rate</th><th>Lessons</th><th>Gross PnL</th><th>Cost scenario</th></tr></thead><tbody id="hourlyRows"></tbody></table></div></section>
       <!-- Recent trades -->
       <div class="panel full-width">
         <div class="panel-header">

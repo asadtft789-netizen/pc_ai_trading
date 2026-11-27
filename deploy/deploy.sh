@@ -1,4 +1,6 @@
 #!/bin/bash
+printf "%s\n" "Legacy deployment disabled. See DEPLOYMENT.md for release gates." >&2
+exit 78
 # Deploy the self-evolving trading AI to a remote Linux server.
 # Usage: ./deploy.sh <user>@<host> [path_on_server]
 set -euo pipefail

@@ -1,3 +1,7 @@
+# Archived deployment instructions
+
+Current release status and the Oracle procedure are in [DEPLOYMENT.md](DEPLOYMENT.md). The commands below describe historical installations.
+
 # Running the Self-Evolving Trading AI Online (Headless / Laptop Closed)
 
 This project is designed to run as an unattended daemon on an always-on machine — a VPS, Raspberry Pi, or a second PC. Your laptop only needs to stay open long enough to deploy it.

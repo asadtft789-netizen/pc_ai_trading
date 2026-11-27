@@ -91,25 +91,35 @@ async function loadMetrics() {
   document.getElementById("accCorrect").textContent = data.correct_observations ?? 0;
   document.getElementById("accWrong").textContent = data.wrong_observations ?? 0;
 
-  const age=data.broker_sync?(Date.now()-Date.parse(data.broker_sync))/1000:Infinity;
-  document.getElementById('syncState').textContent=`Broker: ${age>45?'stale / unknown':data.snapshot} · last confirmed sync ${data.broker_sync||'never'} · last new research bar processed ${data.research||'never'}`;
-  const el = document.getElementById("modeBadge");
-  const modeVal = document.getElementById("modeValue");
-  if (data.mode === "PAPER") {
-    el.className = "mode-badge paper";
-    el.textContent = "PAPER TRADING";
-    modeVal.textContent = "PAPER";
-    modeVal.style.color = "#22c55e";
-  } else if (data.mode === "REAL") {
-    el.className = "mode-badge real";
-    el.textContent = "LIVE TRADING";
-    modeVal.textContent = "REAL";
-    modeVal.style.color = "#ef4444";
-  } else {
-    el.className = "mode-badge";
-    el.textContent = "—";
-    modeVal.textContent = "—";
+  document.getElementById("modeBadge").textContent = "REAL TRADING DISABLED";
+  document.getElementById("modeValue").textContent = "PAPER";
+}
+
+async function loadHealth() {
+  const h = await fetchJson("/api/health");
+  const fields = [
+    ["Supervisor heartbeat", h.supervisor_liveness],
+    ["Broker reconciliation", h.reconciliation_freshness + " / " + h.snapshot],
+    ["Research heartbeat", h.research_liveness],
+    ["Learning receipt", String(h.learning_sequence)],
+    ["Uncertain orders", String(h.uncertain_orders)],
+    ["Paper entry authorization", h.entries],
+    ["Strategy evidence", h.evidence.replaceAll("_", " ")],
+    ["Allocated marked equity", h.marked_allocated_equity ?? "unverified"],
+    ["Source revision", h.source_revision ?? "unverified"],
+    ["Operational schema", String(h.schema_version)]
+  ];
+  const list = document.getElementById("operationalHealth");
+  list.replaceChildren();
+  for (const [name, value] of fields) {
+    const label = document.createElement("dt");
+    const reading = document.createElement("dd");
+    label.textContent = name;
+    reading.textContent = value;
+    list.append(label, reading);
   }
+  document.getElementById("syncState").textContent = "Last broker sync " + (h.broker_sync || "unknown");
+
 }
 
 async function loadRegime() {
@@ -130,15 +140,15 @@ async function loadRegime() {
 }
 
 async function loadStrategy() {
-  const data = await fetchJson("/api/strategy");
-  if (!data) return;
-
-  document.getElementById("strategyId").textContent = data.id || "—";
-  document.getElementById("strategyName").textContent = data.name || "No active strategy";
-  const meta = [];
-  if (data.generation != null) meta.push("Generation " + data.generation);
-  if (data.parent_id) meta.push("Parent: " + data.parent_id);
-  document.getElementById("strategyMeta").textContent = meta.length ? meta.join("  |  ") : "—";
+  const data = await fetchJson("/api/strategies");
+  const list = document.getElementById("strategyList");
+  list.replaceChildren();
+  for (const record of data) {
+    const item = document.createElement("li");
+    item.textContent = [record.regime || "global", record.status, record.name].join(" / ");
+    list.append(item);
+  }
+  if (!data.length) list.textContent = "No registered strategy.";
 }
 
 async function loadTrades() {
@@ -297,7 +307,8 @@ async function loadPriceChart() {
 // ---------------------------------------------------------------------------
 async function refresh() {
   await Promise.all([
-    fetchJson('/api/hourly').then(data=>{const body=document.getElementById('hourlyRows');body.replaceChildren();for(const r of data){const tr=document.createElement('tr');for(const v of [r.h,r.total_trades,`${r.wins} / ${r.losses}`,pct(r.win_rate),pct(r.observation_accuracy),r.lessons,money(r.gross),money(r.real_profit_sim)]){const td=document.createElement('td');td.textContent=v;tr.appendChild(td);}body.appendChild(tr);}}),
+    fetchJson('/api/hourly').then(data=>{const body=document.getElementById('hourlyRows');body.replaceChildren();for(const r of data){const tr=document.createElement('tr');for(const v of [r.h,r.total_trades,`${r.wins} / ${r.losses}`,pct(r.win_rate),r.lessons,money(r.gross),money(r.real_profit_sim)]){const td=document.createElement('td');td.textContent=v;tr.appendChild(td);}body.appendChild(tr);}}),
+    loadHealth(),
     loadMetrics(),
     loadRegime(),
     loadStrategy(),

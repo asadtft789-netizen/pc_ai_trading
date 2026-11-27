@@ -1,4 +1,6 @@
 #!/bin/bash
+printf "%s\n" "Legacy deployment disabled. See DEPLOYMENT.md for release gates." >&2
+exit 78
 # Startup script for running the trader inside a Pterodactyl container.
 # Pterodactyl has no systemd; the panel supervises this process itself.
 #

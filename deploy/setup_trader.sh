@@ -1,4 +1,6 @@
 #!/bin/bash
+printf "%s\n" "Legacy deployment disabled. See DEPLOYMENT.md for release gates." >&2
+exit 78
 # One-shot setup for the self-evolving trader on a fresh VPS/sandbox.
 #
 # Usage:

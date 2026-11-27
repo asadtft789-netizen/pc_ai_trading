@@ -1,4 +1,6 @@
 #!/bin/bash
+printf "%s\n" "Legacy deployment disabled. See DEPLOYMENT.md for release gates." >&2
+exit 78
 # Install the self-evolving trader so it runs 24/7 and auto-restarts on crash.
 # Run this once on your VPS.
 #

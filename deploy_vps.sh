@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+printf "%s\n" "Legacy deployment disabled. See DEPLOYMENT.md for release gates." >&2
+exit 78
 # ==============================================================================
 # PHOENIX DEPLOYMENT SCRIPT — Google Cloud Compute Engine
 # ==============================================================================

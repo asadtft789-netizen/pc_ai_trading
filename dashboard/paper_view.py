@@ -5,6 +5,17 @@ from pathlib import Path
 from datetime import datetime, timezone
 ROOT = Path(__file__).resolve().parents[1]
 
+
+def heartbeat(value, threshold):
+    try:
+        when = datetime.fromisoformat(value)
+        if when.tzinfo is None:
+            return 'invalid'
+        age = (datetime.now(timezone.utc) - when).total_seconds()
+        return 'current' if -2 <= age <= threshold else 'stale'
+    except (TypeError, ValueError):
+        return 'unknown'
+
 def read_view(route, arg=None, path=None):
     file = Path(path or os.getenv('PAPER_DB', str(ROOT / 'data' / 'hourly-paper.sqlite'))).resolve()
     with closing(sqlite3.connect(file.as_uri() + '?mode=ro', uri=True, timeout=2)) as c:
@@ -16,7 +27,21 @@ def read_view(route, arg=None, path=None):
         if meta.get('schema') != 'hourly-paper-1':
             raise ValueError('unsupported database')
         if route == 'health':
-            return dict(status='readable', snapshot=meta.get('snapshot', 'unknown'), broker_sync=meta.get('sync_at'), research=meta.get('research_at'))
+            return dict(status='readable', schema_version=c.execute('PRAGMA user_version').fetchone()[0],
+                        source_revision=meta.get('supervise_revision'), snapshot=meta.get('snapshot','unknown'),
+                        snapshot_reason=meta.get('snapshot_reason'), broker_sync=meta.get('sync_at'),
+                        supervisor_liveness=heartbeat(meta.get('supervise_heartbeat'),45),
+                        research_liveness=heartbeat(meta.get('research_heartbeat'),3900),
+                        reconciliation_freshness=heartbeat(meta.get('sync_at'),45), research=meta.get('research_at'),
+                        learning_sequence=int(meta.get('learning_consumed_seq',0)),
+                        learning_progress=json.loads(meta.get('learning_progress','{}')),
+                        entries='unreleased', evidence='no_validated_activation',
+                        marked_allocated_equity=None, confirmed_fees=None,
+                        uncertain_orders=c.execute("""SELECT count(*) FROM intents WHERE state IN
+                            ('reserved','dispatching','submission_unknown','reconciliation_required','unknown')""").fetchone()[0])
+        if route == 'strategies':
+            return rows("""SELECT id,name,regime,status,generation FROM strategies
+                WHERE status IN ('champion','challenger') ORDER BY regime,status,id""")
         if route == 'mode':
             return {'mode': meta.get('mode', 'UNKNOWN'), 'live_enabled': False}
         if route == 'symbols':
