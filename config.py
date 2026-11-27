@@ -112,7 +112,7 @@ class Settings:
             except ImportError:
                 pass  # dotenv optional; rely on existing environment
 
-        return cls(
+        result = cls(
             alpaca=AlpacaConfig(
                 api_key=_getenv("ALPACA_API_KEY", ""),
                 api_secret=_getenv("ALPACA_API_SECRET", ""),
@@ -150,3 +150,9 @@ class Settings:
                 log_level=_getenv("LOG_LEVEL", "INFO"),
             ),
         )
+        r = result.risk
+        if min(r.max_capital_usd, r.max_position_usd, r.max_order_size_usd, r.max_daily_loss_usd, r.min_order_size_usd) <= 0 or r.min_order_size_usd > min(r.max_capital_usd, r.max_position_usd, r.max_order_size_usd):
+            raise ValueError('inconsistent risk limits')
+        if not result.universe.symbols or len(set(result.universe.symbols)) != len(result.universe.symbols):
+            raise ValueError('invalid symbol universe')
+        return result
