@@ -42,6 +42,7 @@ def init(path):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with closing(sqlite3.connect(path, timeout=10, isolation_level=None)) as c:
+        c.execute('PRAGMA journal_mode=WAL')
         c.execute('BEGIN IMMEDIATE')
         with c:
             tables = {r[0] for r in c.execute("select name from sqlite_master where type='table'")}
@@ -56,6 +57,9 @@ def init(path):
                     c.execute("CREATE UNIQUE INDEX IF NOT EXISTS one_champ_per_regime ON strategies(status,regime) WHERE status='champion' AND regime IS NOT NULL")
                     c.execute("CREATE UNIQUE INDEX IF NOT EXISTS one_champ_global ON strategies(status) WHERE status='champion' AND regime IS NULL")
                     c.execute("CREATE UNIQUE INDEX IF NOT EXISTS one_child_per_regime ON strategies(status,regime) WHERE status='challenger' AND regime IS NOT NULL")
+                decision_cols = {r[1] for r in c.execute('PRAGMA table_info(decisions)')}
+                if 'regime' not in decision_cols:
+                    c.execute('ALTER TABLE decisions ADD COLUMN regime TEXT')
                 if 'unsolved_failures' not in tables:
                     c.execute("CREATE TABLE unsolved_failures(id TEXT PRIMARY KEY, lot TEXT, symbol TEXT, regime TEXT, strategy TEXT, pnl REAL, cause TEXT, attempts INTEGER, status TEXT, created_at TEXT, report TEXT)")
             else:
@@ -69,6 +73,8 @@ def init(path):
 def record_unsolved_failure(c, lot, symbol, regime, strategy, pnl, cause, report):
     """Queue or update an unsolved failure for human review if AI cannot repair it."""
     fid = key('failure', lot, strategy)
+    if not lot or lot == 'unsolved':
+        raise ValueError('failure requires an actual lot identifier')
     row = c.execute('select attempts from unsolved_failures where id=?', (fid,)).fetchone()
     if row:
         c.execute('update unsolved_failures set attempts=attempts+1, report=? where id=?', (report, fid))
