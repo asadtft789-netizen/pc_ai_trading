@@ -1,6 +1,8 @@
-"""Equal initial capital sleeves, vectorized next-open long/flat returns; flat boundary at end."""
+"""Exploratory next-open replay with one portfolio allocation and a flat endpoint."""
 import numpy as np
 import pandas as pd
+from portfolio_policy import allocated_targets, portfolio_entry_budget
+from decimal import Decimal
 
 class Backtester:
 
@@ -15,7 +17,15 @@ class Backtester:
             return self._empty_metrics('no_data_or_no_signals')
         symbols = df.index.get_level_values('symbol').unique()
         capital = float(self.r.max_capital_usd)
-        unit = min(capital / len(symbols), self.r.max_order_size_usd, self.r.max_position_usd)
+        if df.index.has_duplicates or not df.signal.isin([0, 1]).all():
+            return self._empty_metrics('invalid_input')
+        delayed = df.sort_index().signal.groupby(level='symbol').shift(fill_value=0)
+        try:
+            targets = allocated_targets(delayed.unstack('symbol'))
+        except ValueError:
+            return self._empty_metrics('missing_held_observation')
+        unit = float(portfolio_entry_budget(*(Decimal(str(x)) for x in
+                    (capital, capital, self.r.max_order_size_usd, self.r.max_position_usd))))
         fee = max(0.0, unit * (self.r.spread_bps + self.r.slippage_bps) / 20000 + self.r.commission_per_order_usd)
         trades = []
         legs = []
@@ -28,7 +38,7 @@ class Backtester:
             sig = g.signal
             if g.index.has_duplicates or not sig.isin([0, 1]).all() or (not (np.isfinite(o) & np.isfinite(p) & (o > 0) & (p > 0)).all()):
                 return self._empty_metrics('invalid_input')
-            target = sig.shift(fill_value=0)
+            target = targets[sym].reindex(g.index).astype(int)
             change = target.diff().fillna(target)
             entries = change.eq(1)
             exits = change.eq(-1)

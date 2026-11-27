@@ -4,7 +4,7 @@
 | WP0 | Baseline reproduced at the audit SHA. Oracle inventory recorded. | Reconfirm account identity, external orders and ownership before cutover. |
 | WP1 | Versioned migration, WAL snapshot, restore-to-new-file, raw history quarantine and independent receipts tested. | Verify all production-era schema shapes from sanitized copies and complete correction review. |
 | WP2 | XNYS sessions, minute aggregation, anchor-specific regimes, history readiness and gap tests. | Long history reconstruction, corporate actions and measured prospective arrival latency. |
-| WP3 | Bounded sizing, lot-owner preservation and quote checks. | Canonical next-quote replay across historical, shadow and supervisor portfolios; decimal marked accounting. |
+| WP3 | Historical replay selects a single position from shared capital. Shadow policy v2 and the supervisor share stop/target prices; existing shadow campaigns retain v1. Fake quote gates and lot-owner preservation tested. | Canonical next-quote replay across historical, shadow and supervisor portfolios; decimal marked accounting. |
 | WP4 | Fake-broker reservation, ambiguity, reconciliation, gating and fencing coverage. Deployed adapter for this branch is read-only by design. | Broker identity, partial-fill independent protection, cancellation races and released paper writer. |
 | WP5 | Frozen development manifests, lane diagnostics, deterministic proposals and daily reservations. | Persistent job lifecycle, typed numerical strategy language, complete confirmatory registry and prospective attribution. |
 | WP6 | Restart, independent receipts, sidecar mismatch and calendar rollover tests. | Evidence certificates, sole activation authority and integrated end-to-end replay. |

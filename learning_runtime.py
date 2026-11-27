@@ -35,7 +35,7 @@ def learning_risk(settings):
     r = settings.risk
     return Risk(r.max_capital_usd, min(r.max_position_usd, r.max_order_size_usd),
                 r.spread_bps + r.slippage_bps, r.max_daily_loss_usd, 0.10, 1,
-                0.000000001, r.max_capital_usd * 0.01, 1800)
+                0.000000001, r.max_capital_usd * 0.01, 1800, policy_revision=2)
 
 
 def bind_store(path, ledger):
@@ -75,7 +75,10 @@ def prepare_campaign(ledger, settings):
     if cfg is not None and equity_date < date.fromisoformat(cfg["end_exclusive"]):
         if cfg.get("calendar_id") != CALENDAR_ID:
             return "legacy_calendar_quarantined"
-        if cfg["symbols"] != symbols or cfg["risk"] != asdict(risk):
+        frozen = Risk(**cfg["risk"])
+        frozen.validate()
+        expected = dict(asdict(risk), policy_revision=frozen.policy_revision)
+        if cfg["symbols"] != symbols or asdict(frozen) != expected:
             raise LearningRecoveryRequired("frozen_settings_changed")
         return "resumed"
     today = equity_sessions(equity_date, equity_date + timedelta(days=1))

@@ -6,3 +6,10 @@ The development suite command python offline_suite.py ran 100 tests in 21.200 se
 Unrestricted python -m unittest discover -v entered the repository's imported skills tree. It reported 595 tests, 7 failures, 371 errors and 52 skips. These results include third-party tools with independent dependency and invocation requirements. The whole-tree command remains failing. The first isolated top-level run also exposed a subprocess import error after switching to a disposable working directory. Explicit propagation of the repository path fixed it and the writer-lock test then passed.
 
 Local WAL backup/restore is verified using disposable databases and an in-flight transaction. No claim of production backup coverage, Linux resource behavior, paper account protection, delivered alerts, 48-hour endurance, real session completion or trading advantage follows from this suite. CI is configured for pull requests and manual dispatch. Hosted CI execution is unverified.
+
+## Shared portfolio follow-up
+The first policy integration run exposed four legacy shadow-campaign regressions (103 tests, three failures and one error). The new target changed the result of an already-frozen fixture. Campaigns now store a policy revision; existing v1 and pre-versioned campaigns retain their old behavior and new production shadow campaigns select v2. A regression exercises the same price path under both versions.
+
+The final command python offline_suite.py ran 104 tests in 25.255 seconds and passed all 104 on Windows. test_portfolio_policy covers one-position competition, missing held marks, the shared capital cap, frozen targets and legacy replay. Historical open prices remain exploratory proxies for quotes.
+
+A genuine local component soak started from the clean detached aa8149a revision on 2026-11-27 at 18:40:54 PKT. Its append-only events.jsonl records process elapsed time and each cycle result. This is an earlier component revision; its cycles cannot certify subsequent portfolio changes or final release readiness.

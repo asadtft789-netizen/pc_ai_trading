@@ -96,7 +96,7 @@ def ingest_observations(path, train, test):
 @lru_cache(maxsize=1)
 def _implementation_digest():
     source = hashlib.sha256()
-    for name in ('research.py', 'hourly_features.py', 'backtester.py', 'strategy_worker.py'):
+    for name in ('research.py', 'hourly_features.py', 'backtester.py', 'portfolio_policy.py', 'strategy_worker.py'):
         source.update(Path(__file__).with_name(name).read_bytes())
     return source.hexdigest()
 

@@ -6,6 +6,7 @@ from decimal import Decimal as D, InvalidOperation, ROUND_DOWN
 from config import PAPER_ORIGIN as PAPER, PAPER_EQUITIES
 from paper_gateway import AlpacaPaper
 from paper_order_policy import EntryEvidence, WriterBusy, age, fresh, instant, writer_lock
+from portfolio_policy import STOP_ATR, portfolio_entry_budget, protection_prices
 from paper_store import db, now, stamp, amt, key, get, put, rebuild
 from phoenix_integrity import learning_halted, entry_allowed
 from strategy_worker import FEATURES
@@ -190,12 +191,12 @@ class StrategyExecutor:
                 or instant(fact['received_at']) != instant(capabilities.published_at)):
             return False
         atr = fact['atr']
-        if atr is None or gap != amt(atr, True) * 2 or gap >= quote[0]:
+        if atr is None or gap != amt(atr, True) * STOP_ATR or gap >= quote[0]:
             return False
         cash = self._allocated_capital(c)
         notional = qty * quote[1]
         minimum = max(D(1), amt(self.risk.min_order_size_usd, True), capabilities.minimum_notional)
-        maximum = min(D(1), cash, amt(get(c, 'buying_power')), amt(get(c, 'equity')),
+        maximum = portfolio_entry_budget(cash, min(amt(get(c, 'buying_power')), amt(get(c, 'equity'))),
                       amt(self.risk.max_order_size_usd, True), amt(self.risk.max_position_usd, True))
         return minimum <= notional <= maximum and gap * qty <= cash * D('.01')
 
@@ -315,7 +316,8 @@ class StrategyExecutor:
             close_clock = getattr(self.b, 'session_close', None)
             close = close_clock(lot['symbol']) if close_clock else None
             session_exit = close and age(close) >= -300
-            if bid <= basis - gap or bid >= basis + 2 * gap or session_exit or flat:
+            stop, target = protection_prices(basis, gap)
+            if bid <= stop or bid >= target or session_exit or flat:
                 return 'exit submitted' if self._close_position(lot, now_iso) else 'exit pending or blocked'
         if lots or getattr(self.b, 'orders_enabled', False) is not True or os.getenv('PAPER_ENTRIES_ENABLED') != 'YES':
             return 'entries paused or exposure held'

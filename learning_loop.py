@@ -4,6 +4,7 @@ Python 3.10+. Times are integer UTC seconds. Calendar labels are exchange dates.
 The caller supplies actual sessions, completed bars, features and point-in-time gates.
 """
 from __future__ import annotations
+from portfolio_policy import MAX_POSITIONS, protection_prices
 
 import ast
 import calendar
@@ -117,8 +118,10 @@ class Risk:
     quantity_step: float
     max_stop_risk: float
     no_entry_last_seconds: int
+    policy_revision: int = 1
 
     def validate(self) -> None:
+        require(type(self.policy_revision) is int and self.policy_revision in (1, 2), "unknown shadow policy")
         for v in asdict(self).values(): require(type(v) in (float,int) and math.isfinite(v),'non-finite risk setting')
         require(min(self.cash,self.order_cap,self.daily_loss,self.quantity_step,self.max_stop_risk)>0 and 0<self.max_drawdown_fraction<1 and 0<=self.fee_bps<1000 and type(self.max_positions) is int and self.max_positions>0 and self.no_entry_last_seconds>=0,'invalid risk limits')
 
@@ -144,7 +147,7 @@ class Portfolio:
     def __init__(self, book: Book, risk: Risk, bps: int) -> None:
         self.table=truth(expression(book)); self.r=risk; self.slip=bps/10000; self.fee=risk.fee_bps/10000
         self.cash=self.peak=self.day_start=risk.cash; self.dd=0.; self.pos:dict[str,tuple[float,float]]={}; self.prev:dict[str,tuple[bool,float]]={}
-        self.day_block=False; self.run_block=False; self.trades=0; self.fills=0
+        self.targets={}; self.position_limit = min(MAX_POSITIONS,risk.max_positions) if risk.policy_revision == 2 else risk.max_positions; self.day_block=False; self.run_block=False; self.trades=0; self.fills=0
 
     def step(self, bars: Mapping[str,Bar], fresh: bool, full: bool, final: bool, can_enter: bool) -> Step:
         if fresh:
@@ -157,15 +160,16 @@ class Portfolio:
         actions=[]; audit:list[Json]=[]; before=self.fills; op={s:b.o for s,b in bars.items()}; cl={s:b.c for s,b in bars.items()}
         start=equity(op); mark(start); held=set(self.pos)
         def sell(s: str,p: float,why: str) -> None:
-            q,_=self.pos.pop(s); px=p*(1-self.slip); audit.append({'kind':'shadow_fill','side':'sell','symbol':s,'why':why,'qty':q,'price':px,'fee':q*px*self.fee}); self.cash+=q*px*(1-self.fee); self.trades+=1; self.fills+=1; actions.append((s,why))
+            q,_=self.pos.pop(s); self.targets.pop(s); px=p*(1-self.slip); audit.append({'kind':'shadow_fill','side':'sell','symbol':s,'why':why,'qty':q,'price':px,'fee':q*px*self.fee}); self.cash+=q*px*(1-self.fee); self.trades+=1; self.fills+=1; actions.append((s,why))
         for s in sorted(held):
             b=bars[s]; _,stop=self.pos[s]
             if b.o<=stop: sell(s,b.o,'gap_stop')
+            elif self.r.policy_revision == 2 and b.o >= self.targets[s]: sell(s,b.o,'gap_target')
             elif self.run_block or self.day_block or not self.prev.get(s,(False,0))[0]: sell(s,b.o,'exit')
         # Full batch, one cash pool, alphabetical priority. Never spend the same cash twice.
         for s in sorted(bars):
             b=bars[s]; take,gap=self.prev.get(s,(False,0.))
-            reason=next((msg for fail,msg in ((not take,'no_prior_signal'),(not full,'short_slot'),(not can_enter,'session_cutoff'),(b.entry_ok is None,'unverified_gate'),(b.entry_ok is False,'executor_veto'),(s in held,'already_held'),(len(self.pos)>=self.r.max_positions,'position_cap'),(self.day_block or self.run_block,'loss_limit')) if fail),None)
+            reason=next((msg for fail,msg in ((not take,'no_prior_signal'),(not full,'short_slot'),(not can_enter,'session_cutoff'),(b.entry_ok is None,'unverified_gate'),(b.entry_ok is False,'executor_veto'),(s in held,'already_held'),(len(self.pos)>=self.position_limit,'position_cap'),(self.day_block or self.run_block,'loss_limit')) if fail),None)
             if reason:
                 audit.append({'kind':'skip','symbol':s,'why':reason}); continue
             px=b.o*(1+self.slip); unit=px*(1+self.fee)
@@ -175,11 +179,13 @@ class Portfolio:
             q=math.floor(min(cap/unit,self.r.max_stop_risk/gap)/self.r.quantity_step)*self.r.quantity_step
             if q<=0:
                 audit.append({'kind':'skip','symbol':s,'why':'below_quantity_step'}); continue
-            audit.append({'kind':'shadow_fill','side':'buy','symbol':s,'qty':q,'price':px,'fee':q*px*self.fee,'initial_stop':px-gap}); self.cash-=q*unit; self.pos[s]=(q,px-gap); actions.append((s,'buy')); self.fills+=1
+            stop, self.targets[s] = protection_prices(px,gap)
+            audit.append({'kind':'shadow_fill','side':'buy','symbol':s,'qty':q,'price':px,'fee':q*px*self.fee,'initial_stop':px-gap}); self.cash-=q*unit; self.pos[s]=(q,stop); actions.append((s,'buy')); self.fills+=1
         mark(equity(op))
-        # Conservative stop fills. No target is inferred from hourly high/low ordering.
+        # If both levels trade in a bar, use the adverse ordering for exploratory replay.
         for s,(_,stop) in sorted(list(self.pos.items())):
             if bars[s].l<=stop: sell(s,stop,'stop')
+            elif self.r.policy_revision == 2 and bars[s].h>=self.targets[s]: sell(s,self.targets[s],'target')
         end=equity(cl); mark(end)
         if final or self.run_block or self.day_block:
             for s in sorted(list(self.pos)): sell(s,bars[s].c,'close' if final else 'risk_exit')
