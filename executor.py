@@ -6,6 +6,7 @@ from urllib.request import Request, build_opener
 import json, os
 from llm_mutator import NoRedirect
 from paper_store import db, now, stamp, amt, key, get, put, rebuild
+from phoenix_integrity import learning_halted, entry_allowed
 PAPER = 'https://paper-api.alpaca.markets'
 TERMINAL = {'filled', 'canceled', 'expired', 'rejected'}
 
@@ -174,6 +175,9 @@ class StrategyExecutor:
     def _order(self, symbol, side, qty, lot, strategy, gap, decision):
         cid = key('order', side, symbol, decision, lot)
         qty = amt(qty, True)
+        # A sidecar halt or unreadable initialized sidecar blocks buys, not exits.
+        if side == 'buy' and learning_halted(self.path):
+            return None
         with db(self.path, True) as c:
             if get(c, 'snapshot') != 'ok' or not 0 <= age(get(c, 'sync_at')) <= 30 or get(c, 'account_blocked') != '0':
                 return None
@@ -183,7 +187,7 @@ class StrategyExecutor:
                 return None
             active = [r for r in c.execute('select * from lots') if D(r['qty'])]
             # max one exposed symbol (conservative correlation limit)
-            if side == 'buy' and (active or get(c, 'entry_gate') != strategy or (not c.execute("select 1 from strategies where id=? and status='champion'", (strategy,)).fetchone())):
+            if side == 'buy' and (active or not entry_allowed(c, symbol, decision, strategy)):
                 return None
             if side == 'sell' and (not any((r['id'] == lot and D(r['qty']) >= qty for r in active))):
                 return None
@@ -217,7 +221,7 @@ class StrategyExecutor:
             daily = D(str(c.execute('select coalesce(sum(gross),0) from outcomes where substr(at,1,10)=?', (now_iso[:10],)).fetchone()[0]))
             recent = [r[0] for r in c.execute('select sum(gross) from outcomes join lots l on l.id=outcomes.lot where cast(l.qty as real)=0 group by lot order by max(at) desc limit 100')]
             gate = get(c, 'entry_gate')
-            regimes = {r['symbol']: r['regime'] for r in c.execute('select symbol, regime from decisions')}
+            regimes = {symbol: d['regime'] for symbol, d in decisions.items()}
             history = [D(str(r[0])) for r in c.execute('select gross-0.001*(entry+exit)*cast(qty as real) from outcomes order by at,id')]
             day_net = D(str(c.execute('select coalesce(sum(gross-0.001*(entry+exit)*cast(qty as real)),0) from outcomes where substr(at,1,10)=?', (now_iso[:10],)).fetchone()[0]))
         for lot in lots:
@@ -235,10 +239,10 @@ class StrategyExecutor:
         for value in history:
             allocated += value
             peak_alloc = max(peak_alloc, allocated)
-        if lots or not champ or (allocated <= peak_alloc * D('.90')) or (os.getenv('PAPER_ENTRIES_ENABLED') != 'YES') or (equity <= peak * D('.90')) or (min(daily, day_net) <= -amt(self.s.risk.max_daily_loss_usd, True)):
+        if lots or not champ or learning_halted(self.path) or (allocated <= peak_alloc * D('.90')) or (os.getenv('PAPER_ENTRIES_ENABLED') != 'YES') or (equity <= peak * D('.90')) or (min(daily, day_net) <= -amt(self.s.risk.max_daily_loss_usd, True)):
             return 'entries paused or exposure held'
         for d in decisions.values():
-            if not d['target'] or (not 3600 <= age(d['t']) <= 4200) or ('/' in d['symbol']):
+            if d['target'] != 1 or (not 3600 <= age(d['t']) <= 4200) or ('/' in d['symbol']):
                 continue
             regime = regimes.get(d['symbol'])
             regime_gate = None
@@ -246,11 +250,11 @@ class StrategyExecutor:
                 with db(self.path) as c2:
                     regime_gate = get(c2, f'entry_gate_{regime}')
             if regime_gate is None:
-                regime_gate = gate  # fallback to global gate for backward compatibility
+                regime_gate = gate if not regime else None
             if regime_gate != d['strategy']:
                 continue
             quote = self._entry_quote(d['symbol'])
-            if not fresh(quote) or not d['atr']:
+            if not fresh(quote) or d['atr'] is None or not D(str(d['atr'])).is_finite() or D(str(d['atr'])) <= 0:
                 continue
             bid, ask, _ = quote
             gap = amt(d['atr'], True) * 2
