@@ -4,6 +4,7 @@
 - [x] Local WAL snapshot restored to a new database and verified.
 - [ ] Clear outstanding F01–F24 findings for every released capability.
 - [ ] Demonstrate shared portfolio semantics, costs, risk stops and next-quote execution.
+- [ ] **F16 blocks statistical promotion.** Independent calibration and verification must clear the revised inference protocol before the supervisor can accept any evidence certificate. The registered v1 AR(1) null produced 25 false-positive families in 256 trials against a 0.05/12 campaign target. See handoffs/STATISTICAL_RELEASE_HOLD.md.
 - [ ] Demonstrate preregistered comparative evidence, calendar completeness and atomic activation.
 - [ ] Independently verify Linux isolation, sole writer, shadow-to-paper parity and recovery.
 - [ ] Measure 48 continuous hours of fault/restart/resource replay on a final eligible revision.

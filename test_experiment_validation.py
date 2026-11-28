@@ -4,6 +4,8 @@ import sqlite3
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
+import statistical_release
 
 import numpy as np
 import pandas as pd
@@ -291,24 +293,41 @@ class Tournament(unittest.TestCase):
         report = self.finish(cid,m)
         with db(self.path) as c:
             cert = needed(c,"certificate",report["certificates"][cand])
-        self.assertEqual(cert["reasons"],["insufficient_calibration_or_power"])
+        self.assertEqual(cert["reasons"],["insufficient_calibration_or_power", statistical_release.BLOCKER])
         self.assertGreater(upper_bound(0,32),CAMPAIGN_ALPHA)
 
-    def test_supervisor_contract_with_synthetic_verifier_fixture(self):
+    def verified_fixture(self):
         cid,m,cand = self.start()
         panels = self.fill(cid,m,cand)
-        # Inject an already-verified study solely to exercise the consumer's positive branch.
         study = dict(design=digest(self.model),family_size=3,effect=.001,bootstrap_seed=771,
                      implementation=m["protocol"]["implementation"],null_upper=.001,power_lower=.9)
         with db(self.path,True) as c:
             append(c,"calibration","test-double",study)
         self.checks(cid,m,panels,"test-double")
+        return cid,m,cand
+
+    def test_supervisor_contract_with_synthetic_verifier_fixture(self):
+        cid,m,cand = self.verified_fixture()
         report = self.finish(cid,m)
+        with db(self.path) as c:
+            cert = needed(c,"certificate",report["certificates"][cand])
+        self.assertEqual(cert["status"],"inconclusive")
+        self.assertIn(statistical_release.BLOCKER,cert["reasons"])
+        self.assertFalse(verify_eligibility(self.path,report["certificates"][cand],candidate=cand,
+                         routing=m["routing"],parent=self.proposal["parent"]))
+
+    def test_old_eligible_certificate_is_blocked_at_consumption(self):
+        cid,m,cand = self.verified_fixture()
+        # Simulate a decision issued while a protocol was released, then revoke it.
+        with patch.object(statistical_release,"RELEASED_PROTOCOLS",frozenset({digest(m["protocol"])})):
+            report = self.finish(cid,m)
         args = dict(certificate=report["certificates"][cand],candidate=cand,
                     routing=m["routing"],parent=self.proposal["parent"])
-        self.assertTrue(supported_claim(self.path,"registered_prospective_superiority",**args))
-        for change in ({"routing":{}},{"parent":"stale"},{"candidate":"swapped"},{"certificate":"missing"}):
-            self.assertFalse(supported_claim(self.path,"registered_prospective_superiority",**{**args,**change}))
+        self.assertFalse(supported_claim(self.path,"registered_prospective_superiority",**args))
+        with patch.object(statistical_release,"RELEASED_PROTOCOLS",frozenset({digest(m["protocol"])})):
+            self.assertTrue(supported_claim(self.path,"registered_prospective_superiority",**args))
+            for change in ({"routing":{}},{"parent":"stale"},{"candidate":"swapped"},{"certificate":"missing"}):
+                self.assertFalse(supported_claim(self.path,"registered_prospective_superiority",**{**args,**change}))
         self.assertFalse(supported_claim(self.path,"future_profit",**args))
         with db(self.path) as c:
             self.assertEqual(c.execute("SELECT count(*) FROM strategies WHERE status='champion'").fetchone()[0],0)

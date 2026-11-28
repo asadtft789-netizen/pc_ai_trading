@@ -8,6 +8,7 @@ from campaign_statistics import CAMPAIGN_ALPHA, holm, paired_result
 from experiment_store import append, needed, read
 from learning_loop import digest, require
 from paper_store import db
+import statistical_release
 
 
 def differing_count(left, right):
@@ -183,6 +184,8 @@ def close_campaign(path, identity, *, clock=time.time):
     certs = {}
     for cand in m["candidates"]:
         reasons = unknown.copy()
+        if not statistical_release.released(m["protocol"]):
+            reasons.append(statistical_release.BLOCKER)
         if m["scope"] == "crypto":
             reasons.append("crypto_execution_profile_unverified")
         fails = []
@@ -230,6 +233,8 @@ def verify_eligibility(path, certificate, *, candidate, routing, parent):
     """Read-only predicate for the supervisor's own next-boundary routing transaction."""
     with db(path) as c:
         cert = needed(c, "certificate", certificate)
+        if not statistical_release.released(cert["protocol"]):
+            return False
         report = needed(c, "decision", cert["campaign"])
         m = needed(c, "campaign", cert["campaign"])
     return (digest(cert) == certificate and cert["status"] == "eligible" and cert["candidate"] == candidate
