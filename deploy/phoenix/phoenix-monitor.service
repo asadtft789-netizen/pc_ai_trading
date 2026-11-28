@@ -1,0 +1,38 @@
+[Unit]
+Description=Phoenix Local health and optional external heartbeat
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=15min
+StartLimitBurst=5
+
+[Service]
+Type=oneshot
+User=phoenix-monitor
+Group=phoenix-state
+WorkingDirectory=/opt/phoenix/current
+Environment=PAPER_DB=/var/lib/phoenix/state/operational.sqlite
+Environment=PYTHON_DOTENV_DISABLED=1
+Environment=OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
+EnvironmentFile=/opt/phoenix/current/revision.env
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+LockPersonality=yes
+LogNamespace=phoenix
+ExecStart=/opt/phoenix/current/venv/bin/python -m operational /var/lib/phoenix/state/operational.sqlite /var/lib/phoenix/telemetry/backup/status.json /var/lib/phoenix/telemetry/monitor/health.json
+EnvironmentFile=-/etc/phoenix/monitor.env
+ReadOnlyPaths=/var/lib/phoenix/state
+ReadWritePaths=/var/lib/phoenix/telemetry/monitor
+TimeoutStartSec=20s
+MemoryMax=64M
+CPUWeight=30
+CPUQuota=20%
+TasksMax=12

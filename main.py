@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import sqlite3
+import sys
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -12,6 +13,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 from config import Settings
 from paper_store import init, db, put, now
+from paper_order_policy import WriterBusy, writer_lock
 from executor import PAPER
 from learning_runtime import LearningRecoveryRequired, observe_new_bars
 from market_time import equity_sessions
@@ -92,6 +94,11 @@ class SecretRedactingFilter(logging.Filter):
         r.stack_info = None
         return True
 
+class ServiceFormatter(logging.Formatter):
+    def format(self, record):
+        return json.dumps({"at": now(), "level": record.levelname, "event": record.getMessage()})
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument('role', choices=['research', 'supervise', 'check', 'preflight', 'import-rules'], nargs='?', default='research')
@@ -107,7 +114,11 @@ def main():
         return
     if args.role == 'preflight':
         from executor import AlpacaPaper, StrategyExecutor
-        _, ok = StrategyExecutor(path, AlpacaPaper(s), s).reconcile_trades()
+        try:
+            with writer_lock(path, suffix=".supervise.lock"):
+                _, ok = StrategyExecutor(path, AlpacaPaper(s), s).reconcile_trades()
+        except WriterBusy:
+            raise SystemExit("Stop the Phoenix supervisor before standalone preflight.") from None
         print('Paper snapshot reconciled. No order submitted.' if ok else 'Paper snapshot unknown. Stop and inspect the dedicated paper account.')
         raise SystemExit(0 if ok else 1)
     if args.role == 'import-rules':
@@ -116,11 +127,24 @@ def main():
             p.error('--legacy-db required')
         print('Reviewed legacy rules:', import_rules(path, args.legacy_db))
         return
+    try:
+        with writer_lock(path, suffix=f".{args.role}.lock"):
+            run_role(args, s, path)
+    except WriterBusy:
+        print("Another process owns this role for the ledger.", file=sys.stderr)
+        raise SystemExit(78) from None
+
+
+def run_role(args, s, path):
+    if args.role == 'supervise':
+        with db(path, True) as connection:
+            put(connection, 'allocation_limit_usd', s.risk.max_capital_usd)
     # Private client diagnostics must not propagate HTTP headers, bodies or URLs.
     log = logging.getLogger('paper_daemon')
     log.propagate = False
     log.setLevel(s.runtime.log_level)
-    handler = logging.FileHandler(path.parent / 'daemon.log')
+    handler = logging.StreamHandler()
+    handler.setFormatter(ServiceFormatter())
     handler.addFilter(SecretRedactingFilter())
     log.addHandler(handler)
     logging.getLogger().addHandler(logging.NullHandler())
@@ -138,19 +162,23 @@ def main():
         from executor import StrategyExecutor, AlpacaPaper
         adapter = StrategyExecutor(path, AlpacaPaper(s), s)
         tick = adapter.sync_positions
+    consecutive_errors = 0
     while True:
         try:
-            result = tick()
-            log.info('%s: %s', args.role, result)
+            tick()
+            log.info('%s_tick_completed', args.role)
             with db(path, True) as c:
                 put(c, args.role + '_heartbeat', now())
+                put(c, args.role + '_revision', os.getenv('PHOENIX_REVISION', 'unknown'))
+            consecutive_errors = 0
         except Exception as e:
+            consecutive_errors += 1
             if args.role=='research':
                 with db(path,True) as c:
                     for rl in REGIMES:
                         put(c, f'entry_gate_{rl}', 'closed')
             log.error('%s unavailable (%s); no automatic replay of submissions', args.role, type(e).__name__)
-            if args.once:
+            if args.once or consecutive_errors >= 3:
                 raise SystemExit(1)
             time.sleep(20)
             continue

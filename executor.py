@@ -1,4 +1,5 @@
 """Paper supervision and simulated order lifecycle."""
+import json
 import os
 from datetime import datetime, timedelta
 from decimal import Decimal as D, InvalidOperation, ROUND_DOWN
@@ -54,6 +55,16 @@ class StrategyExecutor:
             if account_was and account_was != account:
                 raise ValueError('account changed')
             equity, bp = amt(equity, True), amt(bp)
+            if (not isinstance(positions, dict) or any(not isinstance(symbol, str)
+                    or not symbol.isascii() or not symbol.isalnum() for symbol in positions)
+                    or not isinstance(orders, (list, tuple, set)) or any(not isinstance(order, str) for order in orders)):
+                raise ValueError("invalid account positions or orders")
+            with db(self.path, True) as connection:
+                put(connection, 'broker_observation', json.dumps({
+                    'observed_at': now(), 'equity': str(equity), 'available_buying_power': str(bp),
+                    'account_blocked': blocked, 'open_order_count': len(orders),
+                    'positions': {symbol: str(amt(qty)) for symbol, qty in positions.items()},
+                }))
             observed = {}
             for i in pending:
                 o = self.b.lookup(i['id'])

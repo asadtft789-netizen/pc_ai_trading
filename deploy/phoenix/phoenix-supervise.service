@@ -1,0 +1,47 @@
+[Unit]
+Description=Phoenix Paper observation and reconciliation
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=15min
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=phoenix-supervisor
+Group=phoenix-state
+WorkingDirectory=/opt/phoenix/current
+Environment=PAPER_DB=/var/lib/phoenix/state/operational.sqlite
+Environment=PYTHON_DOTENV_DISABLED=1
+Environment=OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
+EnvironmentFile=/opt/phoenix/current/revision.env
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+LockPersonality=yes
+LogNamespace=phoenix
+ExecStart=/opt/phoenix/current/venv/bin/python -m main supervise
+ReadWritePaths=/var/lib/phoenix/state
+UMask=0007
+Restart=on-failure
+RestartSec=30s
+RestartPreventExitStatus=77 78
+TimeoutStopSec=25s
+EnvironmentFile=/etc/phoenix/supervisor.env
+UnsetEnvironment=PAPER_ENTRIES_ENABLED
+MemoryLow=128M
+MemoryHigh=192M
+MemoryMax=256M
+CPUWeight=900
+CPUQuota=90%
+TasksMax=24
+
+[Install]
+WantedBy=multi-user.target

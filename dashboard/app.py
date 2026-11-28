@@ -1,12 +1,28 @@
 from pathlib import Path
-import sqlite3, sys
+import sqlite3
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 ROOT = Path(__file__).resolve().parent
-sys.path.insert(0, str(ROOT.parent))
 from dashboard.paper_view import read_view
 app = FastAPI(title='Hourly paper trading monitor', docs_url=None, redoc_url=None, openapi_url=None)
+# The private tunnel connects to the loopback listener. Deployments may
+# explicitly allow the hostname assigned by their authenticated VPN.
+import os
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=[
+    "127.0.0.1", "localhost", *os.getenv("PHOENIX_DASHBOARD_HOSTS", "").split(),
+])
+
+@app.middleware("http")
+async def private_response(request, call_next):
+    response = await call_next(request)
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    return response
+
 app.mount('/static', StaticFiles(directory=str(ROOT / 'static')), name='static')
 
 def view(route, arg=None):

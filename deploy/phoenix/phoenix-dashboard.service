@@ -1,0 +1,44 @@
+[Unit]
+Description=Phoenix Private read-only dashboard
+StartLimitIntervalSec=15min
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=phoenix-dashboard
+Group=phoenix-state
+WorkingDirectory=/opt/phoenix/current
+Environment=PAPER_DB=/var/lib/phoenix/state/operational.sqlite
+Environment=PYTHON_DOTENV_DISABLED=1
+Environment=OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
+EnvironmentFile=/opt/phoenix/current/revision.env
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+LockPersonality=yes
+LogNamespace=phoenix
+ExecStart=/opt/phoenix/current/venv/bin/python -m uvicorn dashboard.app:app --host 127.0.0.1 --port 8787 --no-proxy-headers --no-access-log --limit-concurrency 16
+Restart=on-failure
+RestartSec=30s
+RestartPreventExitStatus=77 78
+TimeoutStopSec=25s
+Environment=PHOENIX_STATUS_FILE=/var/lib/phoenix/telemetry/monitor/health.json
+EnvironmentFile=-/etc/phoenix/dashboard.env
+IPAddressDeny=any
+IPAddressAllow=localhost
+ReadOnlyPaths=/var/lib/phoenix/state
+MemoryMax=96M
+CPUWeight=30
+CPUQuota=25%
+TasksMax=24
+
+[Install]
+WantedBy=multi-user.target

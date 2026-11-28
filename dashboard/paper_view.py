@@ -2,19 +2,11 @@
 import os, sqlite3, json
 from contextlib import closing
 from pathlib import Path
-from datetime import datetime, timezone
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def heartbeat(value, threshold):
-    try:
-        when = datetime.fromisoformat(value)
-        if when.tzinfo is None:
-            return 'invalid'
-        age = (datetime.now(timezone.utc) - when).total_seconds()
-        return 'current' if -2 <= age <= threshold else 'stale'
-    except (TypeError, ValueError):
-        return 'unknown'
+from operational import freshness, read_status
+
 
 def read_view(route, arg=None, path=None):
     file = Path(path or os.getenv('PAPER_DB', str(ROOT / 'data' / 'hourly-paper.sqlite'))).resolve()
@@ -27,16 +19,36 @@ def read_view(route, arg=None, path=None):
         if meta.get('schema') != 'hourly-paper-1':
             raise ValueError('unsupported database')
         if route == 'health':
+            telemetry = read_status(os.getenv('PHOENIX_STATUS_FILE', file.parent / 'health.json'))
+            broker = json.loads(meta.get('broker_observation', '{}'))
+            broker_freshness = freshness(broker.get('observed_at'), 45)
+            data = rows('SELECT symbol,max(t) AS latest_bar FROM watermarks GROUP BY symbol ORDER BY symbol')
             return dict(status='readable', schema_version=c.execute('PRAGMA user_version').fetchone()[0],
                         source_revision=meta.get('supervise_revision'), snapshot=meta.get('snapshot','unknown'),
                         snapshot_reason=meta.get('snapshot_reason'), broker_sync=meta.get('sync_at'),
-                        supervisor_liveness=heartbeat(meta.get('supervise_heartbeat'),45),
-                        research_liveness=heartbeat(meta.get('research_heartbeat'),3900),
-                        reconciliation_freshness=heartbeat(meta.get('sync_at'),45), research=meta.get('research_at'),
+                        supervisor_liveness=freshness(meta.get('supervise_heartbeat'),45),
+                        research_liveness=freshness(meta.get('research_heartbeat'),3900),
+                        reconciliation_freshness=freshness(meta.get('sync_at'),45), research=meta.get('research_at'),
                         learning_sequence=int(meta.get('learning_consumed_seq',0)),
                         learning_progress=json.loads(meta.get('learning_progress','{}')),
                         entries='unreleased', evidence='no_validated_activation',
                         marked_allocated_equity=None, confirmed_fees=None,
+                        allocation_limit_usd=meta.get('allocation_limit_usd'),
+                        broker_observation=broker, broker_observation_freshness=broker_freshness,
+                        local_open_orders=rows("""SELECT id,symbol,side,qty,state,created FROM intents
+                            WHERE state NOT IN ('filled','canceled','expired','rejected','rejected_locally')
+                            ORDER BY created DESC LIMIT 50"""),
+                        data_watermarks=data,
+                        risk={'entry_halt':meta.get('integrity_entries_paused', 'YES'),
+                              'daily_halt_utc':meta.get('daily_halt_utc'),
+                              'allocated_drawdown_halt':meta.get('allocated_drawdown_halt'),
+                              'position_protection':'unverified'},
+                        telemetry=telemetry, telemetry_freshness=freshness(telemetry.get('at'), 90),
+                        research_scopes=json.loads(meta.get('research_scope_status','{}')),
+                        development_batches=rows("""SELECT consumer,cut,results FROM development_batches
+                            ORDER BY cut DESC,consumer LIMIT 12"""),
+                        failures=rows("""SELECT symbol,regime,strategy,attempts,status,created_at
+                            FROM unsolved_failures ORDER BY created_at DESC LIMIT 12"""),
                         uncertain_orders=c.execute("""SELECT count(*) FROM intents WHERE state IN
                             ('reserved','dispatching','submission_unknown','reconciliation_required','unknown')""").fetchone()[0])
         if route == 'strategies':

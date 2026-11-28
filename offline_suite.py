@@ -24,19 +24,32 @@ def guard(event, args):
     raise PermissionError("Offline Phoenix test attempted external networking")
 
 
+def application_modules():
+    excluded = {"skills", "venv", "__pycache__", "data"}
+    for directory, dirs, files in os.walk(ROOT):
+        dirs[:] = sorted(name for name in dirs if name not in excluded and not name.startswith("."))
+        for filename in sorted(files):
+            if filename.startswith("test_") and filename.endswith(".py"):
+                path = (Path(directory) / filename).relative_to(ROOT).with_suffix("")
+                yield ".".join(path.parts)
+
+
 def main():
     for name in tuple(os.environ):
         if name.upper() not in {"PATH","PATHEXT","SYSTEMROOT","WINDIR","COMSPEC","TMP","TEMP","TMPDIR",
                                 "LANG","LC_ALL","PYTHONUTF8","LD_LIBRARY_PATH","SYSTEMDRIVE","NUMBER_OF_PROCESSORS"}:
             del os.environ[name]
     sys.addaudithook(guard)
-    modules = sys.argv[1:] or [p.stem for p in sorted(ROOT.glob("test_*.py"))]
+    vendor = sys.argv[1:] == ["--vendored"]
+    modules = sys.argv[1:] or list(application_modules())
     with tempfile.TemporaryDirectory() as work:
         os.environ.update(HOME=work, USERPROFILE=work, PAPER_DB=str(Path(work)/"paper.sqlite"),
                           PYTHONPATH=str(ROOT), PYTHON_DOTENV_DISABLED="1")
         os.chdir(work)
         try:
-            suite = unittest.defaultTestLoader.loadTestsFromNames(modules)
+            loader = unittest.defaultTestLoader
+            suite = (loader.discover(str(ROOT / "skills"), top_level_dir=str(ROOT))
+                     if vendor else loader.loadTestsFromNames(modules))
             return 0 if unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful() else 1
         finally:
             os.chdir(ROOT)

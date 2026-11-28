@@ -1,4 +1,5 @@
 """Research-only limits. Reservations are charged even when a worker dies."""
+import shutil
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -55,7 +56,12 @@ class MemoryAdmission:
         return not paused
 
     def eligible(self):
-        return self.sample(available_mib(), time.monotonic())
+        memory_ok = self.sample(available_mib(), time.monotonic())
+        try:
+            disk_ok = shutil.disk_usage(Path(self.path).parent).free >= 1 << 30
+        except OSError:
+            disk_ok = False
+        return memory_ok and disk_ok
 
     def wait(self, seconds):
         end = time.monotonic() + seconds
