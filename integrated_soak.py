@@ -43,6 +43,15 @@ def stop(process):
         process.wait(timeout=3)
 
 
+def worker_usage(process):
+    directory = Path("/proc") / str(process.pid)
+    stats = (directory / "stat").read_text().rsplit(")", 1)[-1].split()
+    cpu = (int(stats[11]) + int(stats[12])) / os.sysconf("SC_CLK_TCK")
+    rss_line = next(line for line in (directory / "status").read_text().splitlines()
+                    if line.startswith("VmRSS:"))
+    return {"pid": process.pid, "cpu_seconds": cpu, "rss_kib": int(rss_line.split()[1])}
+
+
 def record(handle, **payload):
     handle.write(json.dumps({"at": datetime.now(timezone.utc).isoformat(), **payload}) + "\n")
     handle.flush()
@@ -171,7 +180,8 @@ def observe(directory, revision, smoke, log, previous):
                 record(log, **common, event="sample", continuous_seconds=elapsed,
                        sample_gap_seconds=recorded_gap, supervisor_restarts=restarts,
                        verified_faults=verified_faults, learning_sequence=health["learning_sequence"],
-                       supervisor=health["snapshot"], resources=readings)
+                       supervisor=health["snapshot"], resources=readings,
+                       workers={role: worker_usage(worker) for role, worker in workers.items()})
                 if smoke and elapsed > 90:
                     raise RuntimeError("smoke_deadline_exceeded")
                 if (fault_started is None and verified_faults and next_backup > process_started

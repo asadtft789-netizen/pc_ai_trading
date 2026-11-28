@@ -13,3 +13,11 @@ The first policy integration run exposed four legacy shadow-campaign regressions
 The final command python offline_suite.py ran 104 tests in 25.255 seconds and passed all 104 on Windows. test_portfolio_policy covers one-position competition, missing held marks, the shared capital cap, frozen targets and legacy replay. Historical open prices remain exploratory proxies for quotes.
 
 A genuine local component soak started from the clean detached aa8149a revision on 2026-11-27 at 18:40:54 PKT. Its append-only events.jsonl records process elapsed time and each cycle result. This is an earlier component revision; its cycles cannot certify subsequent portfolio changes or final release readiness.
+
+## Linux WP7 development
+
+At the common commit, the pinned CPython 3.12 environment passed pip check and all 104 offline tests in 7.768 seconds with loopback enabled. The first sandboxed run returned one socket permission error. Archived whole-tree discovery returned 601 tests, 371 errors and 52 skips. The imported MT5 test module replaced the application dashboard name during mixed discovery. The isolated vendored diagnostic returned 538 tests, 368 errors and 52 skips under application dependencies. All Phoenix application tests remain in the separate release suite.
+
+At development revision 8e55bc5, all 111 offline tests passed in 7.594 seconds. The local encrypted-storage drill restored both databases. Unit definitions passed static systemd 257 user-mode parsing with executable stubs and sysusers dry run. Chromium at a Pixel 7 viewport passed layout, health rendering, paper labeling and navigation. Dependency audit and redacted Gitleaks scans passed after six scoped vendored false positives were reviewed.
+
+Integrated smoke at 8e55bc5 reached receipt sequence 1, verified one killed supervisor and fake broker recovery, and restored both databases after 16.21 continuous elapsed seconds. This does not satisfy the 48-hour acceptance gate. No Oracle, private Android route, real systemd runtime, off-host storage or external alert was exercised. See handoffs/AGENT_5.md.

@@ -5,3 +5,4 @@
 - Restricted the paper gateway to observation while exercising authorization, ownership, reconciliation and writer fencing with fakes.
 - Added bounded development proposals, enrollment identities, comparison statistics, read-only dashboard diagnostics and offline acceptance tools.
 - Historical replay now uses one allocation across competing symbols. New shadow campaigns use versioned stop/target behavior; prior campaigns retain their frozen rules.
+- Added Ubuntu staging and offline rollback, separately bounded units, WAL-aware backup sets, opt-in off-host transport and heartbeat, read-only operational dashboard data, and an integrated soak harness with persistent evidence. Production release gates remain open.
