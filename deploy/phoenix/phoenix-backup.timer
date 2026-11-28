@@ -1,0 +1,9 @@
+[Unit]
+Description=Schedule Phoenix backup
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+
+[Install]
+WantedBy=timers.target

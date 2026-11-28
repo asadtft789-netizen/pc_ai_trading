@@ -97,17 +97,55 @@ async function loadMetrics() {
 
 async function loadHealth() {
   const h = await fetchJson("/api/health");
+  const broker = h.broker_observation ?? {};
+  const resources = h.telemetry?.resources ?? {};
+  const backup = h.telemetry?.backup ?? {};
+  const learning = h.learning_progress ?? {};
+  const listItems = (items, render) => items?.length ? items.map(render).join(" · ") : "None recorded";
+  const gib = bytes => bytes == null ? "Unknown" : (bytes / 2 ** 30).toFixed(2) + " GiB";
   const fields = [
     ["Supervisor heartbeat", h.supervisor_liveness],
     ["Broker reconciliation", h.reconciliation_freshness + " / " + h.snapshot],
+    ["Broker observation", h.broker_observation_freshness + " / " + (broker.observed_at ?? "Unknown")],
+    ["Paper account equity", broker.equity ?? "Unknown"],
+    ["Available buying power", broker.available_buying_power ?? "Unknown"],
+    ["Account restriction", broker.account_blocked == null ? "Unknown" : broker.account_blocked ? "Blocked" : "No broker block reported"],
+    ["Broker positions", broker.positions ? listItems(Object.entries(broker.positions), ([s, q]) => s + " " + q) : "Unknown"],
+    ["Broker open orders", broker.open_order_count ?? "Unknown"],
+    ["Broker open order states", broker.open_orders == null ? "Unknown" : listItems(broker.open_orders,
+      o => [o.symbol ?? "Unknown symbol", o.side ?? "unknown side", o.state].join(" "))],
+    ["Local pending orders", listItems(h.local_open_orders, o => o.symbol + " " + o.side + " " + o.qty + " (" + o.state + ")")],
+    ["Uncertain local orders", h.uncertain_orders],
     ["Research heartbeat", h.research_liveness],
-    ["Learning receipt", String(h.learning_sequence)],
-    ["Uncertain orders", String(h.uncertain_orders)],
+    ["Learning receipt sequence", h.learning_sequence],
+    ["Learning campaign", learning.campaign ?? "Unknown"],
+    ["Learning state", learning.state ?? learning.lifecycle ?? "Unknown"],
+    ["Missing batches / unavailable features", (learning.missing_batch ?? "Unknown") + " / " + (learning.features_unavailable ?? "Unknown")],
+    ["Recent experiment batches", listItems(h.development_batches, b => b.consumer + " " + b.cut + " (" + b.results.map(r => r.status ?? "unknown").join(", ") + ")")],
+    ["Unresolved failures", listItems(h.failures, f => f.symbol + " " + f.status + " (" + f.attempts + " attempts)")],
     ["Paper entry authorization", h.entries],
-    ["Strategy evidence", h.evidence.replaceAll("_", " ")],
-    ["Allocated marked equity", h.marked_allocated_equity ?? "unverified"],
-    ["Source revision", h.source_revision ?? "unverified"],
-    ["Operational schema", String(h.schema_version)]
+    ["Statistical release", h.evidence.replaceAll("_", " ")],
+    ["Validated strategies", h.evidence.startsWith("F16_") ? "Held by F16"
+      : h.routing.state === "unknown" ? "Unknown"
+        : listItems(h.validated_strategies, s => s.candidate + " / certificate " + s.certificate)],
+    ["Active supervisor routing", h.routing.state === "observed"
+      ? "Generation " + h.routing.generation + " · " + Object.entries(h.routing.routes)
+        .map(([scope, id]) => scope + " " + (id ?? "cash")).join(" · ") : "Unknown"],
+    ["Allocated marked equity", h.marked_allocated_equity ?? "Unverified"],
+    ["Allocation limit in USD", h.allocation_limit_usd ?? "Unknown"],
+    ["Confirmed fees", h.confirmed_fees ?? "Unverified"],
+    ["Risk and protection", "Entry halt " + h.risk.entry_halt + " / daily halt " + (h.risk.daily_halt_utc ?? "Unknown") + " / drawdown halt " + (h.risk.allocated_drawdown_halt ?? "Unknown") + " / protection " + h.risk.position_protection],
+    ["Latest usable market data", listItems(h.data_watermarks, d => d.symbol + " " + d.latest_bar)],
+    ["Resource sample", h.telemetry_freshness],
+    ["CPU load / logical CPUs", (resources.load_1m ?? "Unknown") + " / " + (resources.cpu_count ?? "Unknown")],
+    ["Available RAM", resources.memory_available_mib == null ? "Unknown" : resources.memory_available_mib + " MiB"],
+    ["Free disk", gib(resources.disk_free_bytes)],
+    ["Operational DB / WAL", gib(resources.database_bytes?.operational) + " / " + gib(resources.database_bytes?.operational_wal)],
+    ["Last verified local backup", backup.verified_at ?? "Unknown"],
+    ["Backup state / off-host copy", (backup.state ?? "Unknown") + " / " + (backup.offsite ?? "Unknown")],
+    ["Operational alerts", h.telemetry?.alerts?.join(" · ") || (h.telemetry_freshness === "current" ? "None reported" : "Unknown")],
+    ["Source revision", h.source_revision ?? "Unverified"],
+    ["Operational schema", h.schema_version]
   ];
   const list = document.getElementById("operationalHealth");
   list.replaceChildren();
@@ -145,7 +183,7 @@ async function loadStrategy() {
   list.replaceChildren();
   for (const record of data) {
     const item = document.createElement("li");
-    item.textContent = [record.regime || "global", record.status, record.name].join(" / ");
+    item.textContent = [record.regime || "global", record.evidence_class, record.status, record.name, "generation " + record.generation, record.id].join(" / ");
     list.append(item);
   }
   if (!data.length) list.textContent = "No registered strategy.";

@@ -8,7 +8,7 @@
 | WP4 | Fake-broker reservation, ambiguity, reconciliation, gating and fencing coverage. Deployed adapter for this branch is read-only by design. | Broker identity, partial-fill independent protection, cancellation races and released paper writer. |
 | WP5 | Frozen development manifests, lane diagnostics, deterministic proposals and daily reservations. | Persistent job lifecycle, typed numerical strategy language, complete confirmatory registry and prospective attribution. |
 | WP6 | Restart, independent receipts, sidecar mismatch and calendar rollover tests. | Evidence certificates, sole activation authority and integrated end-to-end replay. |
-| WP7 | Read-only dashboard, verified environment pins, local backup verification, resource admission and soak harness. | Linux acceptance, resource measurements, service isolation, off-host recovery and external heartbeat. |
+| WP7 | Linux versioned staging and service definitions, loopback dashboard, verified backup sets, encrypted transport drill, CI scanners and integrated soak smoke. | Live systemd/cgroup tests on disposable Ubuntu, real 48-hour final RC soak, authorized off-host restore, alert delivery, Android private access and authoritative accounting/evidence views. |
 | WP8 | Strict-key Oracle inventory only. | All release gates, 48 elapsed hours on a frozen eligible candidate, two actual controlled sessions, 21-day evaluation and 30-session campaign. |
 
 Resume with WP3. Build one deterministic portfolio transition and event stream with shared execution costs and quote eligibility. Compare all three consumers on identical events before adding more strategies.

@@ -14,9 +14,9 @@ class WriterBusy(RuntimeError):
 
 
 @contextmanager
-def writer_lock(database_path):
+def writer_lock(database_path, *, suffix=".writer.lock"):
     """Reconciliation and dispatch must agree on one serialized view of this ledger."""
-    path = Path(database_path).resolve().with_suffix(".writer.lock")
+    path = Path(database_path).resolve().with_suffix(suffix)
     with path.open("a+b") as stream:
         if os.name == "nt":
             import msvcrt

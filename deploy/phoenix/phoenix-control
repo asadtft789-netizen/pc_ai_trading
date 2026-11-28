@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+set -euo pipefail
+umask 022
+
+root=/opt/phoenix
+state=/var/lib/phoenix/state
+checkout=
+sha=
+
+usage() {
+    echo "Usage: phoenix-control stage CHECKOUT FULL_SHA | install-units FULL_SHA | activate FULL_SHA | rollback FULL_SHA" >&2
+    exit 64
+}
+
+[[ $EUID == 0 ]] || { echo "Run with authorized root access." >&2; exit 77; }
+action=${1:-}
+case "$action" in
+    stage) [[ $# == 3 ]] || usage; checkout=$(realpath "$2"); sha=$3 ;;
+    install-units|activate|rollback) [[ $# == 2 ]] || usage; sha=$2 ;;
+    *) usage ;;
+esac
+[[ "$sha" =~ ^[0-9a-f]{40}$ ]] || usage
+
+install -d -m 0755 "$root" "$root/releases"
+exec 9>"$root/.release.lock"
+flock -x 9
+release="$root/releases/$sha"
+
+if [[ "$action" == stage ]]; then
+    [[ $(git -c safe.directory="$checkout" -C "$checkout" rev-parse "$sha^{commit}") == "$sha" ]]
+    if [[ -f "$release/.staged" ]]; then
+        exit 0
+    fi
+    [[ ! -e "$release" ]]
+    mkdir "$release"
+    trap 'rm -rf -- "$release"' EXIT
+    # Build at the final immutable pathname so the venv scripts have correct shebangs.
+    git -c safe.directory="$checkout" -C "$checkout" archive "$sha" -- . ':!skills' ':!example-hourly.sqlite' |
+        tar -x --no-same-owner --no-same-permissions -C "$release"
+    [[ -f "$release/deploy/phoenix/phoenix-control" ]]
+    python3.12 -m venv "$release/venv"
+    "$release/venv/bin/python" -m pip install --disable-pip-version-check --only-binary=:all: --no-deps -r "$release/requirements-verified.txt"
+    "$release/venv/bin/python" -m pip check
+    disposable=$(mktemp -d)
+    trap 'rm -rf -- "$release" "$disposable"' EXIT
+    # The venv installer runs independently of service credentials and persistent state.
+    (cd "$release" && env -i PATH=/usr/bin:/bin HOME="$disposable" PYTHON_DOTENV_DISABLED=1 \
+        PAPER_DB="$disposable/check.sqlite" "$release/venv/bin/python" main.py check)
+    rm -rf -- "$disposable"
+    printf 'PHOENIX_REVISION=%s\n' "$sha" > "$release/revision.env"
+    touch "$release/.staged"
+    chmod -R a-w "$release"
+    trap - EXIT
+    exit 0
+fi
+
+[[ -f "$release/.staged" && -f "$release/revision.env" ]]
+units=(phoenix-supervise.service phoenix-research.service phoenix-dashboard.service phoenix-backup.service
+       phoenix-backup.timer phoenix-monitor.service phoenix-monitor.timer)
+if [[ "$action" == install-units ]]; then
+    systemd-sysusers "$release/deploy/phoenix/phoenix.conf"
+    install -d -m 0755 /var/lib/phoenix
+    install -d -m 2750 -o root -g phoenix-state /var/lib/phoenix/telemetry
+    install -d -m 2770 -o phoenix-supervisor -g phoenix-state "$state"
+    install -d -m 2750 -o phoenix-backup -g phoenix-state /var/lib/phoenix/telemetry/backup
+    install -d -m 2750 -o phoenix-monitor -g phoenix-state /var/lib/phoenix/telemetry/monitor
+    install -d -m 0700 -o phoenix-backup -g phoenix-backup /var/backups/phoenix
+    install -d -m 0700 /etc/phoenix
+    install -d -m 0755 /etc/systemd/journald@phoenix.conf.d
+    install -m 0644 "$release/deploy/phoenix/phoenix-journal.conf" /etc/systemd/journald@phoenix.conf.d/limits.conf
+    for unit in "${units[@]}"; do
+        install -m 0644 "$release/deploy/phoenix/$unit" "/etc/systemd/system/$unit"
+    done
+    install -m 0755 "$release/deploy/phoenix/phoenix-control" /usr/local/sbin/phoenix-control
+    systemctl daemon-reload
+    exit 0
+fi
+
+# Release selection is offline. It never stops a running process or starts a service.
+for unit in "${units[@]}"; do
+    case $(systemctl show --value -p ActiveState "$unit") in
+        inactive|failed) ;;
+        *) echo "Phoenix units must already be stopped before changing the release." >&2; exit 78 ;;
+    esac
+done
+# A schema change needs a separate reviewed migration. Do not restore or replace the ledger here.
+if [[ -f "$state/operational.sqlite" ]]; then
+    "$release/venv/bin/python" -I - "$state/operational.sqlite" "$release" <<'PY'
+import sqlite3, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[2])
+from paper_store import SCHEMA_VERSION
+path = Path(sys.argv[1])
+with sqlite3.connect(path.as_uri() + "?mode=ro", uri=True) as db:
+    assert db.execute("PRAGMA user_version").fetchone() == (SCHEMA_VERSION,), "Schema mismatch"
+    assert db.execute("SELECT v FROM meta WHERE k='schema'").fetchone() == ("hourly-paper-1",)
+PY
+fi
+previous=$(readlink "$root/current" || true)
+[[ "$previous" != "$release" ]] || exit 0
+if [[ "$action" == rollback ]]; then
+    [[ -n "$previous" && $(readlink "$root/previous" || true) == "$release" ]]
+fi
+swap=$(mktemp -d "$root/.switch.XXXXXX")
+trap 'rm -rf -- "$swap"' EXIT
+if [[ -n "$previous" ]]; then
+    ln -s "$previous" "$swap/previous"
+    mv -Tf "$swap/previous" "$root/previous"
+fi
+ln -s "$release" "$swap/current"
+mv -Tf "$swap/current" "$root/current"

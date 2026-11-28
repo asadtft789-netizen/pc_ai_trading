@@ -1,0 +1,8 @@
+# Existing vendored snapshot false positives reviewed against the common baseline.
+# These fingerprints apply to the directory scan. PR commit scans still check changes.
+skills/tradermonty/skills/downtrend-duration-analyzer/scripts/tests/test_generated_transport.py:generic-api-key:15
+skills/tradermonty/skills/pead-screener/scripts/tests/test_fmp_client_json_retry.py:generic-api-key:36
+skills/tradermonty/skills/theme-detector/scripts/calculators/lifecycle_calculator.py:generic-api-key:85
+skills/tradermonty/skills/trader-memory-core/references/thesis_lifecycle.md:generic-api-key:139
+skills/tradermonty/skills/trader-memory-core/SKILL.md:generic-api-key:76
+skills/tradermonty/skills/us-undervalued-growth-screener/scripts/tests/test_capability_cache.py:generic-api-key:85
