@@ -1,10 +1,12 @@
 """Disposable worker entry points for the integrated offline soak."""
 import argparse
 from contextlib import ExitStack
+import ctypes
 from dataclasses import replace
 from datetime import date, datetime, timezone
 import os
 from pathlib import Path
+import signal
 import sys
 import time
 
@@ -13,6 +15,17 @@ from offline_suite import guard
 sys.addaudithook(guard)
 os.environ["PYTHON_DOTENV_DISABLED"] = "1"
 os.environ.pop("PAPER_ENTRIES_ENABLED", None)
+
+
+def bind_lifetime():
+    expected_parent = int(os.environ["PHOENIX_SOAK_RUNNER_PID"])
+    set_parent_death_signal = 1  # Linux PR_SET_PDEATHSIG
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(set_parent_death_signal, signal.SIGTERM, 0, 0, 0) != 0:
+        raise OSError(ctypes.get_errno(), "cannot bind soak worker lifetime")
+    # Cover the race where the runner died before prctl was installed.
+    if os.getppid() != expected_parent:
+        raise SystemExit("Soak runner is no longer alive")
 
 
 def main():
@@ -35,6 +48,7 @@ def main():
     database = args.database
     if os.getenv("PHOENIX_SOAK_DATABASE") != str(database) or database.name != "soak.sqlite":
         raise SystemExit("Disposable soak database required")
+    bind_lifetime()
     settings = Settings.load()
     with ExitStack() as stack:
         stack.enter_context(writer_lock(database, suffix=f".{args.role}.lock"))

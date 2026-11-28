@@ -97,7 +97,8 @@ def observe(directory, revision, smoke, log, previous):
     fault = directory / "broker-down"
     fault.unlink(missing_ok=True)
     env = {"PATH": os.defpath, "HOME": str(directory), "PHOENIX_SOAK_DATABASE": str(database),
-           "PHOENIX_REVISION": revision, "PYTHON_DOTENV_DISABLED": "1", "PYTHONUNBUFFERED": "1",
+           "PHOENIX_REVISION": revision, "PHOENIX_SOAK_RUNNER_PID": str(os.getpid()),
+           "PYTHON_DOTENV_DISABLED": "1", "PYTHONUNBUFFERED": "1",
            "OPENBLAS_NUM_THREADS": "1", "OMP_NUM_THREADS": "1"}
     workers = {}
     restarts = 0
