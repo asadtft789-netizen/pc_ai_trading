@@ -106,6 +106,14 @@ async function loadHealth() {
     ["Paper entry authorization", h.entries],
     ["Strategy evidence", h.evidence.replaceAll("_", " ")],
     ["Allocated marked equity", h.marked_allocated_equity ?? "unverified"],
+    ["Valued at (UTC)", h.valuation_at ?? "unverified"],
+    ["Spendable / reserved cash", [h.available_cash, h.reserved_cash].map(v => v ?? "unverified").join(" / ")],
+    ["Realized / unrealized gross PnL", [h.realized_gross, h.unrealized_gross].map(v => v ?? "unverified").join(" / ")],
+    ["Confirmed / estimated fees", [h.confirmed_fees, h.estimated_fees].map(v => v ?? "unverified").join(" / ")],
+    ["Fills awaiting fee confirmation", h.unconfirmed_fee_count ?? "unverified"],
+    ["Allocated drawdown", h.drawdown == null ? "unverified" : pct(Number(h.drawdown))],
+    ["Daily loss halt", h.daily_halt == null ? "unverified" : String(h.daily_halt)],
+    ["Drawdown halt", h.drawdown_halt == null ? "unverified" : String(h.drawdown_halt)],
     ["Source revision", h.source_revision ?? "unverified"],
     ["Operational schema", String(h.schema_version)]
   ];

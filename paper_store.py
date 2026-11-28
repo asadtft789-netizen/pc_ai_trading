@@ -7,7 +7,7 @@ from pathlib import Path
 from uuid import uuid4
 from sqlite_snapshot import copy_verified
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 def now():
     return datetime.now(timezone.utc).isoformat(timespec='microseconds')
@@ -52,15 +52,15 @@ def init(path):
         with c:
             tables = {r[0] for r in c.execute("select name from sqlite_master where type='table'")}
             version = c.execute('PRAGMA user_version').fetchone()[0]
-            if version not in (0, SCHEMA_VERSION):
+            if version not in (0, 2, SCHEMA_VERSION):
                 raise ValueError('unsupported operational schema version')
             if tables:
                 if 'meta' not in tables or c.execute("select v from meta where k='schema'").fetchone() != ('hourly-paper-1',):
                     raise ValueError('use a separate new operational database')
-                if version == 0:
+                if version < SCHEMA_VERSION:
                     # BEGIN IMMEDIATE fences competing migrations. A second read connection
                     # sees the committed state preceding any schema changes.
-                    copy_verified(path, path.parent / 'backups' / f'{path.name}.pre-v2-{uuid4().hex}.sqlite')
+                    copy_verified(path, path.parent / 'backups' / f'{path.name}.pre-v{SCHEMA_VERSION}-{uuid4().hex}.sqlite')
                 cols = {r[1] for r in c.execute("PRAGMA table_info(strategies)")}
                 if 'regime' not in cols:
                     c.execute("ALTER TABLE strategies ADD COLUMN regime TEXT")
@@ -99,6 +99,9 @@ def init(path):
                         put(c, 'integrity_entries_paused', 'YES')
                 from market_observations import install_observation_contract
                 install_observation_contract(c)
+            if version < SCHEMA_VERSION:
+                from operational_account import install_accounting
+                install_accounting(c)
                 c.execute(f'PRAGMA user_version={SCHEMA_VERSION}')
         if c.execute('PRAGMA journal_mode=WAL').fetchone()[0] != 'wal':
             raise RuntimeError('operational store requires WAL')
@@ -144,7 +147,7 @@ def rebuild(c):
             if q > held or owners[lot][0] != r['symbol']:
                 raise ValueError('exit has no matched entry')
             cost = basis if q == held else q * basis / held
-            c.execute('insert into outcomes(id,lot,strategy,symbol,qty,entry,exit,gross,at) values(?,?,?,?,?,?,?,?,?)', (r['id'], lot, owners[lot][1], r['symbol'], str(q), float(cost / q), float(p), float(p * q - cost), r['at']))
+            c.execute('insert into outcomes(id,lot,strategy,symbol,qty,entry,exit,gross,at) values(?,?,?,?,?,?,?,?,?)', (r['id'], lot, owners[lot][1], r['symbol'], str(q), str(cost / q), str(p), str(p * q - cost), r['at']))
             held -= q
             basis -= cost
         else:

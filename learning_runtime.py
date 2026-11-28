@@ -1,6 +1,7 @@
 """Daemon integration for the independent, observational equity learning journal."""
 import json
 import time
+import sqlite3
 import uuid
 from contextlib import closing
 from dataclasses import asdict
@@ -11,7 +12,8 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 
 from hourly_features import enrich
-from learning_loop import Bar, Ledger, Risk, Rule, digest, mask, next_month, unpack
+from learning_loop import Bar, Risk, Rule, digest, mask, next_month, unpack
+from shadow_campaign import CampaignLedger, QuoteRisk, TimedBar, save_quotes, utc
 from learning_loop_adapter import UNKNOWN_GATES, close_tick
 from market_time import equity_sessions
 from paper_store import db, get, put
@@ -31,11 +33,35 @@ def shadow_book():
     }
 
 
-def learning_risk(settings):
+def learning_risk(settings, revision=3):
     r = settings.risk
-    return Risk(r.max_capital_usd, min(r.max_position_usd, r.max_order_size_usd),
-                r.spread_bps + r.slippage_bps, r.max_daily_loss_usd, 0.10, 1,
-                0.000000001, r.max_capital_usd * 0.01, 1800, policy_revision=2)
+    common = (r.max_capital_usd, min(r.max_position_usd, r.max_order_size_usd))
+    limits = (r.max_daily_loss_usd, 0.10, 1, 0.000000001, r.max_capital_usd * 0.01, 1800)
+    if revision in (1, 2):
+        return Risk(*common, r.spread_bps + r.slippage_bps, *limits, policy_revision=revision)
+    return QuoteRisk(*common, 0, *limits, policy_revision=3,
+                     minimum=r.min_order_size_usd, fee_per_order=r.commission_per_order_usd)
+
+
+def record_shadow_quotes(path, at, quotes, *, unknown=()):
+    """Record quotes already observed by the supervisor. Never open a broker connection."""
+    with db(path) as c:
+        if get(c, 'shadow_quote_capture') != 'v3':
+            return False
+        expected_store, owner = get(c, 'learning_store'), get(c, 'learning_owner')
+    sidecar = Path(path).resolve().with_name('learning_loop.sqlite')
+    # mode=rw preserves missing-store recovery semantics and cannot create an unbound journal.
+    with closing(sqlite3.connect(sidecar.as_uri()+'?mode=rw', uri=True, timeout=2)) as c, c:
+        c.execute('BEGIN IMMEDIATE')
+        meta = {k:json.loads(v) for k,v in c.execute(
+            "SELECT k,v FROM ll_meta WHERE k IN ('owner','store_id','config')")}
+        if not owner or not expected_store or (meta.get('owner'), meta.get('store_id')) != (owner, expected_store):
+            raise LearningRecoveryRequired('quote_journal_identity_mismatch')
+        cfg = meta['config']
+        if cfg['risk'].get('policy_revision') != 3 or not any(
+                d['opened'] <= at.timestamp() <= d['cuts'][-1] for d in cfg['sessions']):
+            return False
+        return save_quotes(c, at, quotes, unknown)
 
 
 def bind_store(path, ledger):
@@ -75,9 +101,10 @@ def prepare_campaign(ledger, settings):
     if cfg is not None and equity_date < date.fromisoformat(cfg["end_exclusive"]):
         if cfg.get("calendar_id") != CALENDAR_ID:
             return "legacy_calendar_quarantined"
-        frozen = Risk(**cfg["risk"])
+        revision = cfg["risk"].get("policy_revision", 1)
+        frozen = (QuoteRisk if revision == 3 else Risk)(**cfg["risk"])
         frozen.validate()
-        expected = dict(asdict(risk), policy_revision=frozen.policy_revision)
+        expected = asdict(learning_risk(settings, revision))
         if cfg["symbols"] != symbols or asdict(frozen) != expected:
             raise LearningRecoveryRequired("frozen_settings_changed")
         return "resumed"
@@ -95,7 +122,7 @@ def pending_frame(path, symbols, first, last, as_of):
     start = pd.Timestamp(first, unit="s", tz="UTC").isoformat()
     stop = pd.Timestamp(last, unit="s", tz="UTC").isoformat()
     known_by = pd.Timestamp(as_of, unit="s", tz="UTC").isoformat()
-    select = """SELECT symbol,t,o,h,l,c,v,interval_kind,interval_end FROM usable_bars
+    select = """SELECT symbol,t,o,h,l,c,v,interval_kind,interval_end,received_at FROM usable_bars
                 WHERE symbol=? AND interval_kind='XNYS_1m' AND interval_end=t
                 AND julianday(received_at)<=julianday(?)"""
     rows = []
@@ -104,7 +131,7 @@ def pending_frame(path, symbols, first, last, as_of):
             rows.extend(c.execute(select + " AND t<? ORDER BY t DESC LIMIT 600", (symbol, known_by, start)))
             rows.extend(c.execute(select + " AND t>=? AND t<=? ORDER BY t", (symbol, known_by, start, stop)))
     frame = pd.DataFrame.from_records(rows, columns=["symbol", "timestamp", "open", "high", "low",
-                                                      "close", "volume", "interval_kind", "interval_end"])
+                                                      "close", "volume", "interval_kind", "interval_end", "received_at"])
     if frame.empty:
         return frame
     frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True, format="ISO8601")
@@ -120,10 +147,13 @@ def observe_new_bars(path, settings, clock=None):
         expected_store = get(c, "learning_store")
     if expected_store and not sidecar.is_file():
         raise LearningRecoveryRequired("journal_missing")
-    with closing(Ledger(sidecar, clock=clock)) as ledger:
+    with closing(CampaignLedger(sidecar, clock=clock)) as ledger:
         bind_store(path, ledger)
         lifecycle = prepare_campaign(ledger, settings)
         cfg = ledger._get("config")
+        quote_campaign = cfg["risk"].get("policy_revision") == 3
+        with db(path, True) as c:
+            put(c, "shadow_quote_capture", "v3" if quote_campaign and lifecycle != "legacy_calendar_quarantined" else "off")
         receipts = {r[0] for r in ledger.db.execute(
             "SELECT cut FROM ll_receipts WHERE cut>=?", (cfg["sessions"][0]["opened"],))}
         pending = [cut for day in cfg["sessions"] for cut in day["cuts"]
@@ -138,7 +168,8 @@ def observe_new_bars(path, settings, clock=None):
                 stored = ledger.db.execute("SELECT body FROM ll_bars WHERE cut=?", (cut,)).fetchone()
                 timestamp = pd.Timestamp(cut, unit="s", tz="UTC")
                 if stored is not None:
-                    batch = {s: Bar(**item) for s, item in json.loads(stored[0]).items()}
+                    bar_class = TimedBar if quote_campaign else Bar
+                    batch = {s: bar_class(**item) for s, item in json.loads(stored[0]).items()}
                 elif timestamp not in batches:
                     progress["missing_batch"] += 1
                     continue
@@ -153,8 +184,10 @@ def observe_new_bars(path, settings, clock=None):
                         if flags is None or pd.isna(row.atr) or row.atr <= 0:
                             break
                         # No independently attested gate at this interval's open.
-                        batch[symbol] = Bar(float(row.open), float(row.high), float(row.low),
-                                            float(row.close), mask(flags), 2 * float(row.atr), None, 0.0)
+                        values = (float(row.open), float(row.high), float(row.low), float(row.close),
+                                  mask(flags), 2 * float(row.atr), None, 0.0)
+                        batch[symbol] = (TimedBar(*values, published=row.received_at, decided=utc(clock()).isoformat())
+                                         if quote_campaign else Bar(*values))
                     if len(batch) != len(symbols):
                         progress["features_unavailable"] += 1
                         continue

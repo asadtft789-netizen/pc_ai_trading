@@ -7,6 +7,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from paper_store import stamp
+from portfolio_events import Decision, MarketFrame, Quote, decision_ok, quote_ok
 
 
 class WriterBusy(RuntimeError):
@@ -42,20 +43,16 @@ def instant(ts):
     return datetime.fromisoformat(stamp(ts))
 
 
-def age(ts):
-    return (datetime.now(timezone.utc) - instant(ts)).total_seconds()
+def age(ts, at=None):
+    return ((at or datetime.now(timezone.utc)) - instant(ts)).total_seconds()
 
 
-def fresh(q, *, entry=True):
-    """Exit triggers may use a recent orderly market even when its spread is wide."""
+def fresh(q, *, entry=True, at=None):
+    """Validate a raw broker quote against the revision 3 market rules."""
     try:
         bid, ask, timestamp = q
-        if not (bid.is_finite() and ask.is_finite() and 0 < bid <= ask):
-            return False
-        if not -2 <= age(timestamp) <= 10:
-            return False
-        midpoint = (ask + bid) / 2
-        return not entry or (ask - bid) * 10000 <= 20 * midpoint
+        quote = Quote("equity", instant(timestamp), bid, ask)
+        return quote_ok(quote, at or datetime.now(timezone.utc), entry)
     except (TypeError, AttributeError, ValueError, InvalidOperation, OverflowError):
         return False
 
@@ -78,25 +75,28 @@ class EntryEvidence:
     protection_verified: bool
     feature_ready: bool
 
-    def permits(self, account, symbol, decision, quote_time):
-        if (self.account != account or self.symbol != symbol or not self.account
-                or any(flag is not True for flag in (self.regular_session, self.fractionable,
-                                                     self.protection_verified, self.feature_ready))):
+    def permits(self, account, symbol, row, raw_quote, at, *, entry):
+        if self.account != account or not account or symbol != self.symbol:
+            return False
+        if self.feature_ready is not True or self.regular_session is not True:
+            return False
+        if entry and (self.fractionable is not True or self.protection_verified is not True):
             return False
         try:
-            start, end = instant(self.interval_start), instant(self.interval_end)
-            published, decided = instant(self.published_at), instant(self.decided_at)
-            return (
-                end == instant(decision) and (end - start).total_seconds() == 3600
-                and instant(self.session_open) <= start
-                and (instant(self.session_close) - instant(self.session_open)).total_seconds() <= 23400
-                and 0 <= (published - end).total_seconds() <= 120
-                and 0 <= (decided - published).total_seconds() <= 30
-                and 0 <= age(self.decided_at) and 0 <= age(decision) <= 300
-                and instant(quote_time) > end and instant(quote_time) >= decided
-                and age(self.session_close) < -1800
-                and self.clock_offset_seconds.is_finite() and abs(self.clock_offset_seconds) <= 2
-                and self.minimum_notional.is_finite() and self.minimum_notional > 0
-            )
+            if (not self.clock_offset_seconds.is_finite() or abs(self.clock_offset_seconds) > 2
+                    or (entry and (not self.minimum_notional.is_finite() or self.minimum_notional <= 0))):
+                return False
+            end = instant(self.interval_end)
+            if end != instant(row['t']):
+                return False
+            frame = MarketFrame(at, instant(self.session_open), instant(self.session_close))
+            if (frame.session_close - frame.session_open).total_seconds() > 23400:
+                return False
+            bid, ask, timestamp = raw_quote
+            quote = Quote(symbol, instant(timestamp), bid, ask)
+            decision = Decision(symbol, row['strategy'], instant(self.interval_start), end,
+                                instant(self.published_at), instant(self.decided_at), row['target'],
+                                Decimal(str(row['atr'])) if row['atr'] is not None else Decimal(0))
+            return decision_ok(decision, frame, quote, entry)
         except (ValueError, TypeError, InvalidOperation, AttributeError, OverflowError):
             return False
