@@ -81,6 +81,14 @@ class Case(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'holdout'): self.l.register(self.days[-10].label,**opt)
         self.assertEqual(next_month(date(2024,1,31)),date(2024,2,29))
 
+    def test_consumed_sidecar_holdout_does_not_change_after_late_receipts(self):
+        self.clock.value=self.days[-1].cuts[-1]
+        first=self.l.holdout()
+        self.assertEqual(first['status'],'inconclusive')
+        self.l.bar(self.days[-1].cuts[-1],batch(0))
+        self.assertEqual(self.l.holdout(),first)
+        self.assertEqual(self.l.db.execute("SELECT count(*) FROM ll_events WHERE kind='holdout_consumed'").fetchone()[0],1)
+
     def test_overlapping_evidence_disallowed(self):
         v=fixture()['ENTRY'].version; d=self.days[0]
         for n in range(3): self.l.observe(str(n),d.opened,d.opened+10+n,'ENTRY',v,0,-0.01,'shadow')

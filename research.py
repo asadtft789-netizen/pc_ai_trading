@@ -8,6 +8,7 @@ from pathlib import Path
 import pandas as pd
 
 from backtester import Backtester
+from historical_validation import development_windows
 from hourly_features import ALL_READY, FEATURE_VERSION, feature_column, signals, strategy_flags, validate_raw
 from market_observations import record_observation
 from paper_store import db, key, now, put
@@ -96,7 +97,8 @@ def ingest_observations(path, train, test):
 @lru_cache(maxsize=1)
 def _implementation_digest():
     source = hashlib.sha256()
-    for name in ('research.py', 'hourly_features.py', 'backtester.py', 'portfolio_policy.py', 'strategy_worker.py'):
+    for name in ('research.py', 'hourly_features.py', 'backtester.py', 'portfolio_policy.py', 'strategy_worker.py',
+                 'phoenix_tournament.py', 'historical_validation.py'):
         source.update(Path(__file__).with_name(name).read_bytes())
     return source.hexdigest()
 
@@ -193,10 +195,13 @@ def review(path, s, train, test, regime, mutator, *, observations_committed=Fals
     evidence = dict(regime=scope, parent=champion['source'] if champion else SEED,
                     confirmed_paper_exits=exits, attributed_lessons=lessons,
                     failure_analysis=[analyze_failure(e) for e in exits if e['gross'] < 0])
+    train, test = development_windows(path, (train, test))
     protocol = dict(scope=scope, parent=champion['id'] if champion else None, features=FEATURE_VERSION,
                     implementation=_implementation_digest(), cost_and_risk=asdict(s.risk),
                     symbols=sorted(set(s.universe.equities) - {'SPY', 'QQQ'}),
                     train=_input_digest(train), validation=_input_digest(test), end=cut,
+                    observed_regimes=hashlib.sha256(json.dumps(regime.get('observed_by_time', {}),
+                                                    sort_keys=True, allow_nan=False).encode()).hexdigest(),
                     evaluation='historical-development-only-v1')
     trial_ids = {}
 
@@ -210,10 +215,17 @@ def review(path, s, train, test, regime, mutator, *, observations_committed=Fals
         return evaluate(source, guard, train, s, scope=scope, observed_by_time=regime.get('observed_by_time'))
 
     incumbent = (champion['source'], json.loads(champion['rule_ids'])[0]) if champion else None
-    if reserve_lanes(path, len(FOCUSES)):
+    if train.empty or test.empty:
+        winner, records = None, [{"status": "inconclusive", "reason": "reserved_history"}]
+    elif reserve_lanes(path, len(FOCUSES)):
         winner, records = run_development(mutator, evidence, evaluate_train, passes, incumbent=incumbent)
     else:
         winner, records = None, [{"status": "waiting", "reason": "daily_variant_budget"}]
+    ids = {hashlib.sha256(json.dumps([source, guard]).encode()).hexdigest(): identity
+           for (source, guard), identity in trial_ids.items()}
+    for record in records:
+        if record.get("proposal_hash") in ids:
+            record["manifest"] = ids[record["proposal_hash"]]
     validation = evaluate(winner['source'], winner['guard'], test, s, scope=scope,
                           observed_by_time=regime.get('observed_by_time')) if winner else None
     # Evaluate strategy code outside operational write transactions.

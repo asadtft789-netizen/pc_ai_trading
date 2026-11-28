@@ -58,6 +58,8 @@ def research_tick(path, settings, ingest, mutator, admission=None):
                     put(c, 'entry_gate_' + scope, 'closed')
     else:
         results['ingestion'] = 'insufficient_history'
+    from campaign_evidence import expire_campaigns
+    results["closed_campaigns"] = expire_campaigns(path)
     learn_from_closes(path, mutator)
     drift(path)
     with db(path, True) as c:

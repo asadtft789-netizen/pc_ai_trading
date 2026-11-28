@@ -223,7 +223,8 @@ def judge(base: Json, stress: Json, gates: Mapping[str,bool|None]) -> tuple[str,
     halves=[[e['cand']-e['inc'] for e in eps if (e['session']<2)==first] for first in (True,False)]
     if not all(halves): return 'inconclusive','one comparison block has no opportunities'
     if not all(gates.values()): return 'rejected','existing research gate failed'
-    if base['cand_trades']<20 or base['cand_pnl']<=0 or base['cand_dd']>=0.1: return 'rejected','candidate shadow trade count, profit or drawdown gate failed'
+    if base['cand_trades']<20: return 'inconclusive','fewer than 20 completed shadow episodes'
+    if base['cand_pnl']<=0 or base['cand_dd']>=0.1: return 'rejected','candidate shadow profit or drawdown gate failed'
     if not all(sum(x)/len(x)>1e-10 for x in halves): return 'rejected','no net advantage in both time blocks'
     if base['cand_dd']>base['inc_dd']+1e-12: return 'rejected','worse portfolio drawdown'
     if stress['cand_pnl']-stress['inc_pnl']<=1e-10: return 'rejected','advantage did not survive two basis points'
@@ -246,13 +247,31 @@ class Ledger:
         CREATE TABLE IF NOT EXISTS ll_rules(id TEXT PRIMARY KEY, logical_id TEXT NOT NULL, created INTEGER NOT NULL, body TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS ll_events(n INTEGER PRIMARY KEY, at INTEGER NOT NULL, kind TEXT NOT NULL, body TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS ll_bars(cut INTEGER PRIMARY KEY, at INTEGER NOT NULL, body TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS ll_reserved_days(opened INTEGER PRIMARY KEY, closed INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS ll_obs(id TEXT PRIMARY KEY, start INTEGER NOT NULL, end INTEGER NOT NULL, rule TEXT NOT NULL, ver TEXT NOT NULL, bits INTEGER NOT NULL, net REAL NOT NULL, origin TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS ll_trials(id TEXT PRIMARY KEY, first TEXT UNIQUE NOT NULL, at INTEGER NOT NULL, state TEXT NOT NULL, frozen TEXT NOT NULL, result TEXT, effective INTEGER);
         CREATE TABLE IF NOT EXISTS ll_solutions(problem_id TEXT PRIMARY KEY, fix_expression TEXT NOT NULL, confirmed_at INTEGER NOT NULL, description TEXT);
         ''')
-        for table in ('ll_events','ll_rules','ll_bars','ll_obs','ll_solutions'):
+        for table in ('ll_events','ll_rules','ll_bars','ll_obs','ll_solutions','ll_reserved_days'):
             for op in ('UPDATE','DELETE'):
                 self.db.execute(f"CREATE TRIGGER IF NOT EXISTS {table}_{op} BEFORE {op} ON {table} BEGIN SELECT RAISE(ABORT,'immutable research history'); END")
+
+        # Restore reservations for both current and already-rolled legacy journals.
+        if self._get('reserved_days_migrated') is None:
+            self._migrate_reservations()
+
+    def _migrate_reservations(self):
+        with self.tx():
+            configs = [self._get('config')]
+            configs.extend(json.loads(row[0])['config'] for row in self.db.execute(
+                "SELECT body FROM ll_events WHERE kind='campaign_closed'"))
+            for cfg in filter(None, configs):
+                self._reserve_days(cfg)
+            self._set('reserved_days_migrated', True)
+
+    def _reserve_days(self, cfg):
+        self.db.executemany("INSERT OR IGNORE INTO ll_reserved_days(opened,closed) VALUES(?,?)",
+                            [(d['opened'],d['cuts'][-1]) for d in cfg['sessions'][-5:]])
 
     def close(self) -> None: self.db.close()
     @contextmanager
@@ -295,6 +314,7 @@ class Ledger:
                                    WHERE state='testing'""",
                                 (encode({'status':'inconclusive','why':'campaign ended without a verdict'}),))
                 self.db.execute("UPDATE ll_trials SET state='expired' WHERE state='staged'")
+            self._reserve_days(cfg)
             self._set('config',cfg); self._set('active',pack(champion)); self._set('original',pack(champion))
             for r in champion.values():
                 self._reg(r)
@@ -329,7 +349,9 @@ class Ledger:
     def suggest(self, target:str='ENTRY', add:bool=False, origin:str='broker_paper') -> Json|None:
         """Propose one missing-feature filter from >=3 independent losses, never a promotion."""
         book=unpack(self._get('active')); require(target in book and target not in LOCKED,'unmapped signal rule'); r=book[target]
-        rows=self.db.execute('SELECT * FROM ll_obs WHERE rule=? AND ver=? AND origin=? ORDER BY end,id',(target,r.version,origin)).fetchall()
+        rows=self.db.execute("""SELECT * FROM ll_obs WHERE rule=? AND ver=? AND origin=?
+            AND NOT EXISTS(SELECT 1 FROM ll_reserved_days WHERE start<closed AND end>opened)
+            ORDER BY end,id""",(target,r.version,origin)).fetchall()
         candidates=[]
         for idx,f in enumerate(FEATURES):
             group=[]; until=-1
@@ -355,6 +377,9 @@ class Ledger:
             refs=[]
             for eid in set(evidence):
                 row=self.db.execute('SELECT * FROM ll_obs WHERE id=?',(eid,)).fetchone(); require(row is not None and row['rule']==anchor and row['ver']==book[anchor].version and row['end']<=now and row['net']<0,'evidence missing or not for this rule version'); refs.append(row)
+            for row in refs:
+                require(not self.db.execute("SELECT 1 FROM ll_reserved_days WHERE ?<closed AND ?>opened",
+                        (row['start'],row['end'])).fetchone(), 'reserved holdout evidence')
             refs.sort(key=lambda r:r['start']); require(len(refs)>=3 and len({r['origin'] for r in refs})==1 and all(a['end']<=b['start'] for a,b in zip(refs,refs[1:])),'three independent loss episodes of one provenance required')
             require(not self.db.execute("SELECT 1 FROM ll_trials WHERE state IN ('testing','staged')").fetchone(),'another candidate is active')
             for x in self.db.execute('SELECT frozen FROM ll_trials'):
@@ -381,6 +406,7 @@ class Ledger:
             if gates.get('safety_attested') is False:
                 self._set('halted',True); self._event('halt',{'reason':'verified hard-boundary violation','trial':ident}); status,why='rejected','hard-boundary violation'; details={'missing_cuts':gaps}
             elif self._get('config')['model_policy']['engine_sha256'] != hashlib.sha256(Path(__file__).read_bytes()).hexdigest(): status,why='inconclusive','reference engine changed during experiment'; details={}
+            elif self.clock()>=f['next']+60: status,why='inconclusive','expired shadow decision'; details={}
             elif gaps: status,why='inconclusive','missing/late hourly batch'; details={'missing_cuts':gaps}
             else:
                 args=(unpack(f['old']),unpack(f['new']),days,rows,Risk(**self._get('config')['risk'])); a=paired(*args,1); b=paired(*args,2); status,why=judge(a,b,gates); details={'one_bp':a,'two_bp':b}
@@ -411,10 +437,31 @@ class Ledger:
 
     def holdout(self) -> Json:
         """Final five sessions, original vs frozen active signals; shadow P&L only."""
-        days=self._days()[-5:]; require(self.clock()>=days[-1].cuts[-1],'holdout still open'); rows,gaps=self._data(days)
-        if gaps or self._get('halted'): return {'status':'inconclusive','missing_cuts':gaps,'halted':self._get('halted')}
-        args=(unpack(self._get('original')),unpack(self._get('active')),days,rows,Risk(**self._get('config')['risk'])); a=paired(*args,1); b=paired(*args,2)
-        return {'status':'inconclusive' if a['unknown_gate'] else 'shadow_only','one_bp':a,'two_bp':b,'broker_pnl':None}
+        days = self._days()[-5:]
+        require(self.clock() >= days[-1].cuts[-1], 'holdout still open')
+        key = 'holdout:' + days[0].label
+        with self.tx():
+            old = self._get(key)
+            if old is not None:
+                return old
+            self._set(key, {'status':'inconclusive', 'reason':'inspection consumed'})
+            book = unpack(self._get('original'))
+            active = unpack(self._get('active'))
+            risk = Risk(**self._get('config')['risk'])
+            halted = self._get('halted')
+            self._event('holdout_consumed', {'first':days[0].label,'last':days[-1].label,
+                                             'original':digest(pack(book)),'shadow':digest(pack(active))})
+        rows,gaps = self._data(days)
+        if gaps or halted:
+            result = {'status':'inconclusive','missing_cuts':gaps,'halted':halted}
+        else:
+            args = (book,active,days,rows,risk)
+            base, stress = paired(*args,1), paired(*args,2)
+            result = {'status':'inconclusive' if base['unknown_gate'] else 'shadow_only',
+                      'one_bp':base,'two_bp':stress,'broker_pnl':None}
+        with self.tx():
+            self._set(key,result)
+        return result
 
     def note(self, identity:str, kind:str, details:Mapping[str,Any]) -> None:
         """Append a deduplicated decision, skip, operational issue, lesson or correction."""

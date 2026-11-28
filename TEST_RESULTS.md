@@ -13,3 +13,9 @@ The first policy integration run exposed four legacy shadow-campaign regressions
 The final command python offline_suite.py ran 104 tests in 25.255 seconds and passed all 104 on Windows. test_portfolio_policy covers one-position competition, missing held marks, the shared capital cap, frozen targets and legacy replay. Historical open prices remain exploratory proxies for quotes.
 
 A genuine local component soak started from the clean detached aa8149a revision on 2026-11-27 at 18:40:54 PKT. Its append-only events.jsonl records process elapsed time and each cycle result. This is an earlier component revision; its cycles cannot certify subsequent portfolio changes or final release readiness.
+
+## Statistical validation branch, 2026-11-28
+
+Debian 13, CPython 3.12.14 and requirements-verified.txt. The common base e955019656e5bf101982bb4f0e5623bed09dd894 reproduced 104/104 with python offline_suite.py in 4.646 seconds. python -m pip check reported no broken requirements. The branch passed 125/125 in 6.977 seconds. The focused command python offline_suite.py test_experiment_validation test_campaign_statistics test_learning_loop passed 51/51 in 3.994 seconds.
+
+python campaign_calibration.py --replicates 256 --family 3 simulated separate null and positive-effect families with 100,000 draws per block length. Under independent daily noise, 3/256 null families had a false rejection. Under AR(1) with rho 0.7, 25/256 did. The 97.5% upper bounds both exceed the campaign budget. Positive shifts yielded 254/256 and 168/256 full-family detections, respectively. These results leave market advantage unestablished. handoffs/AGENT_4.md describes the protocol, test-double evidence, failure found on certificate round-trip, and open integration dependencies.

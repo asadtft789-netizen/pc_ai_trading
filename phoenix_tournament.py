@@ -2,6 +2,8 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from copy import deepcopy
 from itertools import product
+import hashlib
+import json
 from llm_mutator import validate
 from strategy_worker import FEATURES, compile_strategy
 
@@ -56,19 +58,21 @@ def screen(proposals, evaluate, passes, *, incumbent=None, preserve_source=None)
     records = []
     for i, raw in proposals:
         p = dict(raw)
+        proposal_hash = None
         try:
             if preserve_source is not None:
                 p['source'] = preserve_source
             validate(p)
+            proposal_hash = hashlib.sha256(json.dumps([p['source'], p['guard']]).encode()).hexdigest()
             fp = signature(p['source'], p['guard'])
             if fp in seen:
-                records.append({'candidate': i, 'status': 'duplicate'})
+                records.append({'candidate': i, 'proposal_hash':proposal_hash, 'status': 'duplicate'})
                 continue
             seen.add(fp)
             m = evaluate(p['source'], p['guard'])
             ok = bool(passes(m))
             status = 'inconclusive' if m['total_trades'] < 20 else 'rejected'
-            records.append({'candidate': i, 'status': 'passed' if ok else status,
+            records.append({'candidate': i, 'proposal_hash':proposal_hash, 'status': 'passed' if ok else status,
                             'pnl': float(m['pnl']), 'trades': int(m['total_trades']),
                             'drawdown': float(m['max_drawdown']),
                             'model': p.get('provider_model', 'unknown')})
@@ -77,7 +81,7 @@ def screen(proposals, evaluate, passes, *, incumbent=None, preserve_source=None)
                 if best is None or rank > best[0]:
                     best = (rank, p)
         except Exception as exc:
-            records.append({'candidate': i, 'status': 'error',
+            records.append({'candidate': i, 'proposal_hash':proposal_hash, 'status': 'error',
                             'error': type(exc).__name__})
     return (best[1] if best else None), records
 
