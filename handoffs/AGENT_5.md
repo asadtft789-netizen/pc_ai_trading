@@ -12,6 +12,7 @@ WP7 work starts from the verified common commit `e955019656e5bf101982bb4f0e5623b
 - The dependency audit reported no known vulnerabilities. The redacted Gitleaks snapshot and commit range scans passed after six specific vendored false positives were reviewed and recorded. The commit-range scan also checks edits to those locations.
 - Integrated smoke on `8e55bc5` used 16.21 continuous seconds and passed after a verified supervisor kill, simulated broker outage and reconnection, durable learning receipt sequence 1, and a verified backup and restore. The smoke uses synthetic observations and has no elapsed release credit.
 - At `16841cce05ba3111e8f665bfef8ff10f9037e7c4`, all 111 tests passed in 7.479 seconds. A deliberate runner SIGKILL left a usable evidence directory. Resume acquired the worker locks, recorded zero carried elapsed seconds and passed after a fresh 16.21-second smoke interval. That sample reported approximately 83 MiB supervisor RSS and 89 MiB research RSS on the development runner. These are smoke observations rather than Oracle capacity measurements.
+- The first hosted workflow was rejected before jobs started because the wheel-only pip option was in a YAML plain scalar. The corrected workflow uses a block scalar and passed local YAML parsing.
 
 ## Integration contracts
 
