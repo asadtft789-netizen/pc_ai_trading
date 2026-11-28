@@ -163,7 +163,7 @@ def observe(directory, revision, smoke, log, previous):
                 if not first_healthy:
                     first_healthy = True
                     window_started = current
-                if current >= next_backup and fault_started is None:
+                if current >= next_backup and fault_started is None and health["learning_sequence"] > 0:
                     backup(database, backup_dir, revision)
                     next_backup = current + 3600
                 readings = status(database, directory / "missing-backup-status")["resources"]
@@ -172,7 +172,10 @@ def observe(directory, revision, smoke, log, previous):
                        sample_gap_seconds=recorded_gap, supervisor_restarts=restarts,
                        verified_faults=verified_faults, learning_sequence=health["learning_sequence"],
                        supervisor=health["snapshot"], resources=readings)
-                if fault_started is None and verified_faults and (smoke or elapsed >= REQUIRED_SECONDS):
+                if smoke and elapsed > 90:
+                    raise RuntimeError("smoke_deadline_exceeded")
+                if (fault_started is None and verified_faults and next_backup > process_started
+                        and health["learning_sequence"] > 0 and (smoke or elapsed >= REQUIRED_SECONDS)):
                     record(log, **common, event="smoke_passed" if smoke else "accepted",
                            continuous_seconds=elapsed, verified_faults=verified_faults)
                     return 0

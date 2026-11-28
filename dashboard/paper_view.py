@@ -22,7 +22,13 @@ def read_view(route, arg=None, path=None):
             telemetry = read_status(os.getenv('PHOENIX_STATUS_FILE', file.parent / 'health.json'))
             broker = json.loads(meta.get('broker_observation', '{}'))
             broker_freshness = freshness(broker.get('observed_at'), 45)
-            data = rows('SELECT symbol,max(t) AS latest_bar FROM watermarks GROUP BY symbol ORDER BY symbol')
+            data = rows("""SELECT symbol,max(t) AS latest_bar,max(received_at) AS latest_received
+                FROM usable_bars GROUP BY symbol ORDER BY symbol""")
+            batches = rows("""SELECT consumer,cut,results FROM development_batches
+                ORDER BY cut DESC,consumer LIMIT 12""")
+            for batch in batches:
+                batch["results"] = [{key: result.get(key) for key in ("lane", "status", "reason")}
+                                    for result in json.loads(batch["results"])]
             return dict(status='readable', schema_version=c.execute('PRAGMA user_version').fetchone()[0],
                         source_revision=meta.get('supervise_revision'), snapshot=meta.get('snapshot','unknown'),
                         snapshot_reason=meta.get('snapshot_reason'), broker_sync=meta.get('sync_at'),
@@ -45,8 +51,7 @@ def read_view(route, arg=None, path=None):
                               'position_protection':'unverified'},
                         telemetry=telemetry, telemetry_freshness=freshness(telemetry.get('at'), 90),
                         research_scopes=json.loads(meta.get('research_scope_status','{}')),
-                        development_batches=rows("""SELECT consumer,cut,results FROM development_batches
-                            ORDER BY cut DESC,consumer LIMIT 12"""),
+                        development_batches=batches,
                         failures=rows("""SELECT symbol,regime,strategy,attempts,status,created_at
                             FROM unsolved_failures ORDER BY created_at DESC LIMIT 12"""),
                         uncertain_orders=c.execute("""SELECT count(*) FROM intents WHERE state IN

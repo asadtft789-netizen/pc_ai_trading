@@ -26,6 +26,7 @@ class AlpacaPaper:
         if not settings.alpaca.is_paper:
             raise ValueError("paper broker origin required")
         self.s = settings
+        self.order_observations = []
 
     def _get(self, origin, path, params=None):
         if not self.s.alpaca.is_paper or origin not in (PAPER_ORIGIN, "https://data.alpaca.markets"):
@@ -50,6 +51,18 @@ class AlpacaPaper:
         holdings = {p["symbol"].replace("/", "").upper(): amt(p["qty"]) for p in positions}
         if len(holdings) != len(positions):
             raise ValueError("duplicate position in snapshot")
+        self.order_observations = []
+        for order in orders:
+            symbol = str(getattr(order, "symbol", ""))
+            side = getattr(order, "side", None)
+            state = getattr(order, "status", None)
+            self.order_observations.append({
+                "symbol": symbol if symbol.isascii() and symbol.replace("/", "").replace(".", "").isalnum() else None,
+                "side": side if side in ("buy", "sell") else None,
+                "state": state if state in ("new", "accepted", "pending_new", "partially_filled",
+                                           "pending_cancel", "pending_replace", "held", "accepted_for_bidding",
+                                           "stopped", "suspended", "done_for_day", "calculated") else "unknown",
+            })
         return (a["id"], amt(a["equity"], True), min(amt(a["buying_power"]), amt(a["cash"])),
                 holdings, [o.client_order_id for o in orders], a["trading_blocked"] or a["account_blocked"])
 

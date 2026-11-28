@@ -56,13 +56,14 @@ class StrategyExecutor:
                 raise ValueError('account changed')
             equity, bp = amt(equity, True), amt(bp)
             if (not isinstance(positions, dict) or any(not isinstance(symbol, str)
-                    or not symbol.isascii() or not symbol.isalnum() for symbol in positions)
+                    or not symbol.isascii() or not symbol.replace('.', '').isalnum() for symbol in positions)
                     or not isinstance(orders, (list, tuple, set)) or any(not isinstance(order, str) for order in orders)):
                 raise ValueError("invalid account positions or orders")
             with db(self.path, True) as connection:
                 put(connection, 'broker_observation', json.dumps({
                     'observed_at': now(), 'equity': str(equity), 'available_buying_power': str(bp),
                     'account_blocked': blocked, 'open_order_count': len(orders),
+                    'open_orders': getattr(self.b, 'order_observations', None),
                     'positions': {symbol: str(amt(qty)) for symbol, qty in positions.items()},
                 }))
             observed = {}

@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 from config import Settings
-from paper_store import init, db, put, now
+from paper_store import init, db, put, now, retain_wal_files
 from paper_order_policy import WriterBusy, writer_lock
 from executor import PAPER
 from learning_runtime import LearningRecoveryRequired, observe_new_bars
@@ -23,7 +23,7 @@ from research import REGIMES
 ROOT = Path(__file__).resolve().parent
 
 
-def research_tick(path, settings, ingest, mutator, admission=None):
+def research_tick(path, settings, ingest, mutator, admission=None, *, learning_clock=None):
     from research import ingest_observations, review
     from rule_review import drift, learn_from_closes
     train, test = ingest.get_train_test_split()
@@ -34,7 +34,7 @@ def research_tick(path, settings, ingest, mutator, admission=None):
         ingest_observations(path, train, test)
     # A sidecar recovery incident must not suppress other research consumers.
     try:
-        results['learning'] = observe_new_bars(path, settings)
+        results['learning'] = observe_new_bars(path, settings, clock=learning_clock)
     except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
         reason = str(exc) if isinstance(exc, LearningRecoveryRequired) else type(exc).__name__
         results['learning'] = {'reason': reason, 'state': 'recovery_required', 'at': now(),
@@ -128,7 +128,7 @@ def main():
         print('Reviewed legacy rules:', import_rules(path, args.legacy_db))
         return
     try:
-        with writer_lock(path, suffix=f".{args.role}.lock"):
+        with writer_lock(path, suffix=f".{args.role}.lock"), retain_wal_files(path):
             run_role(args, s, path)
     except WriterBusy:
         print("Another process owns this role for the ledger.", file=sys.stderr)

@@ -11,7 +11,7 @@ from backup_sets import backup, keep_names, pair_state, restore
 from dashboard.paper_view import read_view
 from executor import StrategyExecutor
 from operational import heartbeat, status, write_status
-from paper_store import db, init, now, put
+from paper_store import db, init, now, put, retain_wal_files
 from test_hourly import Fake
 from config import Settings
 
@@ -37,6 +37,16 @@ class OperationalTests(unittest.TestCase):
             put(connection, "learning_owner", "owner")
             put(connection, "learning_store", "ledger")
             put(connection, "learning_consumed_seq", 1)
+
+    def test_wal_keeper_permits_idle_read_only_dashboard(self):
+        with retain_wal_files(self.database):
+            self.assertTrue(Path(str(self.database) + "-wal").exists())
+            self.assertTrue(Path(str(self.database) + "-shm").exists())
+            self.root.chmod(0o500)
+            try:
+                self.assertEqual(read_view("health", path=self.database)["status"], "readable")
+            finally:
+                self.root.chmod(0o700)
 
     def test_wal_backup_restores_bound_pair_and_rejects_tampering(self):
         with sqlite3.connect(self.learning) as writer:
