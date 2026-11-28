@@ -1,5 +1,8 @@
 import copy
-from datetime import date, timedelta
+from contextlib import closing
+from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
+from importlib.util import find_spec
 import sqlite3
 from pathlib import Path
 import tempfile
@@ -18,9 +21,11 @@ from campaign_statistics import CAMPAIGN_ALPHA
 from experiment_store import append, needed
 from historical_validation import (development_windows, inspect_holdout, register_dataset,
                                    walk_forward)
-from learning_loop import digest
+from learning_loop import Ledger, digest
+from learning_runtime import bind_store
 from market_time import equity_sessions
 from paper_store import db, init
+from sqlite_snapshot import copy_verified
 from strategy_worker import SEED
 
 
@@ -150,8 +155,8 @@ class Tournament(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.path = init(Path(tmp.name)/"ledger.sqlite")
-        frame = panel(equity_sessions(date(2024,8,1),date(2025,3,1)))
-        ident = register_dataset(self.path,frame,scope="equity",features=["momentum"],
+        self.frame = panel(equity_sessions(date(2024,8,1),date(2025,3,1)))
+        ident = register_dataset(self.path,self.frame,scope="equity",features=["momentum"],
                     provenance=dict(feed="test",vintage="original",feature_version="1",universe=["AAPL"],
                                     quality_evidence=digest("fixture")),horizon_sessions=1)
         self.model = design(0.,.8,.001,2,42)
@@ -323,7 +328,14 @@ class Tournament(unittest.TestCase):
             report = self.finish(cid,m)
         args = dict(certificate=report["certificates"][cand],candidate=cand,
                     routing=m["routing"],parent=self.proposal["parent"])
+        with db(self.path) as c:
+            self.assertEqual(needed(c,"certificate",args["certificate"])["status"],"eligible")
+            before = c.execute("SELECT * FROM strategies ORDER BY id").fetchall()
+        self.assertFalse(verify_eligibility(self.path,**args))
         self.assertFalse(supported_claim(self.path,"registered_prospective_superiority",**args))
+        with db(self.path) as c:
+            self.assertEqual(c.execute("SELECT * FROM strategies ORDER BY id").fetchall(),before)
+            self.assertEqual(c.execute("SELECT count(*) FROM intents").fetchone()[0],0)
         with patch.object(statistical_release,"RELEASED_PROTOCOLS",frozenset({digest(m["protocol"])})):
             self.assertTrue(supported_claim(self.path,"registered_prospective_superiority",**args))
             for change in ({"routing":{}},{"parent":"stale"},{"candidate":"swapped"},{"certificate":"missing"}):
@@ -331,6 +343,134 @@ class Tournament(unittest.TestCase):
         self.assertFalse(supported_claim(self.path,"future_profit",**args))
         with db(self.path) as c:
             self.assertEqual(c.execute("SELECT count(*) FROM strategies WHERE status='champion'").fetchone()[0],0)
+
+    def _assert_restored_statistical_ledger(self, backup_and_restore):
+        cid,m,cand = self.verified_fixture()
+        report = self.finish(cid,m)
+        family_spec = {"specification":"disposable fixture"}
+        family = {digest(family_spec):family_spec}
+        dataset = self.kw["dataset"]
+
+        def fit(specification, training, labels):
+            raise RuntimeError("fixture failure after the holdout charge")
+
+        historical = inspect_holdout(self.path,dataset,self.frame,family,fit,None)
+        self.assertEqual(historical["status"],"inconclusive")
+        for seed in range(11):
+            register(self.path,**{**self.kw,"seed":seed})
+
+        # Capture committed data while the WAL also contains an uncommitted write.
+        with closing(sqlite3.connect(self.path, isolation_level=None)) as writer:
+            writer.execute("PRAGMA wal_autocheckpoint=0")
+            append(writer,"restore_probe","committed",{"value":1})
+            expected = writer.execute("SELECT * FROM experiment_records ORDER BY kind,id").fetchall()
+            self.assertTrue(Path(f"{self.path}-wal").stat().st_size > 32)
+            writer.execute("BEGIN IMMEDIATE")
+            append(writer,"restore_probe","uncommitted",{"value":2})
+            restored = backup_and_restore()
+            writer.rollback()
+        with db(restored) as c:
+            self.assertEqual([tuple(row) for row in c.execute(
+                "SELECT * FROM experiment_records ORDER BY kind,id")],expected)
+            for kind,identity,_,_ in expected:
+                needed(c,kind,identity)  # Verify the content digest of every record.
+            self.assertEqual(c.execute("SELECT count(*) FROM experiment_records WHERE kind='budget'").fetchone()[0],12)
+            self.assertEqual(c.execute("SELECT count(*) FROM experiment_records WHERE kind='consumption'").fetchone()[0],30)
+        self.assertEqual(frozen_campaign(restored,cid),m)
+        self.assertEqual(close_campaign(restored,cid),report)
+        self.assertFalse(verify_eligibility(restored,report["certificates"][cand],candidate=cand,
+                         routing=m["routing"],parent=self.proposal["parent"]))
+        self.assertEqual(register(restored,**self.kw),cid)
+        with self.assertRaisesRegex(ValueError,"budget exhausted"):
+            register(restored,**{**self.kw,"seed":122})
+        self.assertEqual(inspect_holdout(restored,dataset,self.frame,family,None,None),historical)
+        revised = {"specification":"second attempt"}
+        with self.assertRaisesRegex(ValueError,"consumed holdout"):
+            inspect_holdout(restored,dataset,self.frame,{digest(revised):revised},None,None)
+        for sql in ("UPDATE experiment_records SET body='{}' WHERE kind='campaign'",
+                    "DELETE FROM experiment_records WHERE kind='budget'",
+                    "INSERT OR REPLACE INTO experiment_records SELECT * FROM experiment_records WHERE kind='consumption'"):
+            with self.subTest(sql=sql), db(restored,True) as c, self.assertRaisesRegex(
+                    sqlite3.IntegrityError,"immutable experiment record"):
+                c.execute(sql)
+
+    def test_sqlite_backup_restore_preserves_statistical_ledger(self):
+        def backup_and_restore():
+            snapshot = copy_verified(self.path,self.path.with_name("snapshot.sqlite"))
+            return copy_verified(snapshot,self.path.with_name("restore.sqlite"))
+
+        self._assert_restored_statistical_ledger(backup_and_restore)
+
+    @unittest.skipUnless(find_spec("backup_sets"),"requires Agent 5 backup sets")
+    def test_agent5_backup_set_restore_preserves_statistical_ledger(self):
+        from backup_sets import backup, restore, pair_state
+
+        with closing(Ledger(self.path.with_name("learning_loop.sqlite"))) as journal:
+            bind_store(self.path,journal)
+
+        def backup_and_restore():
+            root = self.path.parent / "sets"
+            root.mkdir()
+            snapshot = backup(self.path,root,"a"*40)
+            destination = self.path.parent / "recovered"
+            restore(snapshot,destination)
+            restored = destination / "operational.sqlite"
+            self.assertEqual(pair_state(restored,destination / "learning_loop.sqlite"),
+                             pair_state(self.path,self.path.with_name("learning_loop.sqlite")))
+            return restored
+
+        self._assert_restored_statistical_ledger(backup_and_restore)
+
+    @unittest.skipUnless(find_spec("marked_session"),"requires Agent 1 canonical adapter")
+    def test_agent1_replay_through_registered_campaign_and_sealed_decision(self):
+        from marked_session import SessionTape, replay_marked_session
+        from portfolio_events import Decision, MarketFrame, Quote
+
+        cid,m,cand = self.start()
+        candidate_spec = digest(m["arms"][cand])
+        tapes = {}
+        for i,(day,opened,close) in enumerate(m["calendar"]):
+            op = datetime.fromtimestamp(opened,timezone.utc)
+            cl = datetime.fromtimestamp(close,timezone.utc)
+            cut = op + timedelta(hours=1)
+            times = {t:100 for t in range(opened,close,3600)}
+            times[close] = 100
+            signals = {digest(spec): {} for spec in m["arms"].values()}
+            if i == 0:
+                signals[candidate_spec][cut] = (Decision("AAPL",candidate_spec,op,cut,cut,cut,1,Decimal(1)),)
+                times[opened+3602] = 100
+                times[opened+3603] = 100
+                times[opened+3604] = 98
+            frames = tuple(
+                MarketFrame(at,op,cl,quotes=(Quote("AAPL",at,Decimal(price),Decimal(price)),))
+                for stamp,price in sorted(times.items())
+                for at in (datetime.fromtimestamp(stamp,timezone.utc),)
+            )
+            tapes[day] = SessionTape(frames,signals,((opened,"trend_up"),),Decimal(100),Decimal(101))
+            payload = replay_marked_session(m,day,tapes)
+            record_session(self.path,cid,day,payload,clock=lambda:close+1)
+
+        # 0.01 shares at 100 then 98, with 1.5 bp modeled fees on both notionals.
+        net = -.02 - 1.98*.00015
+        report = self.finish(cid,m)
+        self.assertEqual(report["missing_sessions"],[])
+        portfolio = report["portfolios"][cand]
+        self.assertEqual(portfolio["episodes"],1)
+        self.assertAlmostEqual(portfolio["net_pnl"],net)
+        self.assertAlmostEqual(portfolio["turnover"],1.98)
+        self.assertAlmostEqual(portfolio["by_symbol"]["AAPL"],net)
+        self.assertAlmostEqual(portfolio["max_drawdown"],-net/10)
+        self.assertLess(report["sensitivity"][cand]["cost"]["net_pnl"],net)
+        result = report["comparisons"][cand+":cash"]
+        self.assertEqual(result["differing_episodes"],1)
+        self.assertEqual(result["status"],"inconclusive")
+        self.assertAlmostEqual(result["daily_increment"][0],(net-.0002*1.98)/10)
+        self.assertEqual(result["daily_increment"][1:],[0.]*29)
+        with db(self.path) as c:
+            cert = needed(c,"certificate",report["certificates"][cand])
+        self.assertIn(statistical_release.BLOCKER,cert["reasons"])
+        self.assertFalse(verify_eligibility(self.path,report["certificates"][cand],candidate=cand,
+                         routing=m["routing"],parent=self.proposal["parent"]))
 
     def test_shared_market_correlation_is_not_an_increment(self):
         from campaign_statistics import paired_result

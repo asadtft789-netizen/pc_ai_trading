@@ -83,3 +83,5 @@ An intermediate end-to-end check failed because numeric block-length keys sorted
 | Serial persistence, rho = 0.7 | 25 (9.77%) | 14.08% | 168 (65.63%) | 59.46% |
 
 Both rows use daily SD 0.001, cross-comparison correlation 0.8, an alternative shift of 0.001 after costs, simulation seed 314159 and bootstrap seed 771. The target campaign error rate is approximately 0.417%. Neither design qualifies. In particular the serial case shows that 30 sessions and these fixed blocks can substantially understate uncertainty even after Holm. Preserve all negative results. Any investigation of a longer window, alternate test or different assumptions needs a new prospectively approved protocol and fresh evidence. Baseline and branch tests, synthetic profits and paper-gross episode records establish no market advantage.
+
+See [statistical integration readiness](STATISTICAL_INTEGRATION.md) for the producer, scheduler, supervisor and recovery interfaces and their executable cross-branch checks.
