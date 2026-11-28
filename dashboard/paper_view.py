@@ -6,6 +6,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 from operational import freshness, read_status
+from dashboard.strategy_status import strategy_status
 
 
 def read_view(route, arg=None, path=None):
@@ -19,6 +20,10 @@ def read_view(route, arg=None, path=None):
         if meta.get('schema') != 'hourly-paper-1':
             raise ValueError('unsupported database')
         if route == 'health':
+            strategies = strategy_status(
+                os.getenv("PHOENIX_ROUTING_STATUS_FILE", "/var/lib/phoenix/telemetry/routing/status.json"),
+                os.getenv("PHOENIX_REVISION"),
+            )
             telemetry = read_status(os.getenv('PHOENIX_STATUS_FILE', file.parent / 'health.json'))
             broker = json.loads(meta.get('broker_observation', '{}'))
             broker_freshness = freshness(broker.get('observed_at'), 45)
@@ -37,7 +42,7 @@ def read_view(route, arg=None, path=None):
                         reconciliation_freshness=freshness(meta.get('sync_at'),45), research=meta.get('research_at'),
                         learning_sequence=int(meta.get('learning_consumed_seq',0)),
                         learning_progress=json.loads(meta.get('learning_progress','{}')),
-                        entries='unreleased', evidence='no_validated_activation',
+                        entries='unreleased', **strategies,
                         marked_allocated_equity=None, confirmed_fees=None,
                         allocation_limit_usd=meta.get('allocation_limit_usd'),
                         broker_observation=broker, broker_observation_freshness=broker_freshness,
@@ -57,7 +62,7 @@ def read_view(route, arg=None, path=None):
                         uncertain_orders=c.execute("""SELECT count(*) FROM intents WHERE state IN
                             ('reserved','dispatching','submission_unknown','reconciliation_required','unknown')""").fetchone()[0])
         if route == 'strategies':
-            return rows("""SELECT id,name,regime,status,generation FROM strategies
+            return rows("""SELECT id,name,regime,status,generation,'exploratory' AS evidence_class FROM strategies
                 WHERE status IN ('champion','challenger') ORDER BY regime,status,id""")
         if route == 'mode':
             return {'mode': meta.get('mode', 'UNKNOWN'), 'live_enabled': False}

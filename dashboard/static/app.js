@@ -124,7 +124,13 @@ async function loadHealth() {
     ["Recent experiment batches", listItems(h.development_batches, b => b.consumer + " " + b.cut + " (" + b.results.map(r => r.status ?? "unknown").join(", ") + ")")],
     ["Unresolved failures", listItems(h.failures, f => f.symbol + " " + f.status + " (" + f.attempts + " attempts)")],
     ["Paper entry authorization", h.entries],
-    ["Strategy evidence", h.evidence.replaceAll("_", " ")],
+    ["Statistical release", h.evidence.replaceAll("_", " ")],
+    ["Validated strategies", h.evidence.startsWith("F16_") ? "Held by F16"
+      : h.routing.state === "unknown" ? "Unknown"
+        : listItems(h.validated_strategies, s => s.candidate + " / certificate " + s.certificate)],
+    ["Active supervisor routing", h.routing.state === "observed"
+      ? "Generation " + h.routing.generation + " · " + Object.entries(h.routing.routes)
+        .map(([scope, id]) => scope + " " + (id ?? "cash")).join(" · ") : "Unknown"],
     ["Allocated marked equity", h.marked_allocated_equity ?? "Unverified"],
     ["Allocation limit in USD", h.allocation_limit_usd ?? "Unknown"],
     ["Confirmed fees", h.confirmed_fees ?? "Unverified"],
@@ -177,7 +183,7 @@ async function loadStrategy() {
   list.replaceChildren();
   for (const record of data) {
     const item = document.createElement("li");
-    item.textContent = [record.regime || "global", record.status, record.name, "generation " + record.generation, record.id].join(" / ");
+    item.textContent = [record.regime || "global", record.evidence_class, record.status, record.name, "generation " + record.generation, record.id].join(" / ");
     list.append(item);
   }
   if (!data.length) list.textContent = "No registered strategy.";

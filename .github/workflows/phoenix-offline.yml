@@ -23,6 +23,7 @@ jobs:
       - run: bash -n deploy/phoenix/phoenix-control
       - run: node --check dashboard/static/app.js
       - run: sudo bash deploy/phoenix/verify-units.sh
+      - run: sudo bash deploy/phoenix/verify-state-isolation.sh --fixture
 
   dependency-audit:
     runs-on: ubuntu-24.04
