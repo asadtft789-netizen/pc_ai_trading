@@ -3,6 +3,8 @@ import os, sqlite3, json
 from contextlib import closing
 from pathlib import Path
 from datetime import datetime, timezone
+from operational_account import account_metrics
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -36,7 +38,7 @@ def read_view(route, arg=None, path=None):
                         learning_sequence=int(meta.get('learning_consumed_seq',0)),
                         learning_progress=json.loads(meta.get('learning_progress','{}')),
                         entries='unreleased', evidence='no_validated_activation',
-                        marked_allocated_equity=None, confirmed_fees=None,
+                        **account_metrics(c, meta),
                         uncertain_orders=c.execute("""SELECT count(*) FROM intents WHERE state IN
                             ('reserved','dispatching','submission_unknown','reconciliation_required','unknown')""").fetchone()[0])
         if route == 'strategies':
@@ -70,5 +72,6 @@ def read_view(route, arg=None, path=None):
                 return rows(hourly)
             m = rows('select count(*) total_trades,count(case when pnl>0 then 1 end) win_trades,count(case when pnl<0 then 1 end) loss_trades,avg(pnl) avg_pnl from (' + closed + ')')[0]
             m.update(mode=meta.get('mode', 'UNKNOWN'), correct_observations=m['win_trades'], wrong_observations=m['loss_trades'], win_rate=m['win_trades'] / m['total_trades'] if m['total_trades'] else None, total_pnl=c.execute('select sum(gross) from outcomes').fetchone()[0], daily_pnl=c.execute("select sum(gross) from outcomes where substr(at,1,10)=date('now')").fetchone()[0], snapshot=meta.get('snapshot', 'unknown'), broker_sync=meta.get('sync_at'), research=meta.get('research_at'))
+            m.update(account_metrics(c, meta))
             return m
         raise ValueError('unknown view')

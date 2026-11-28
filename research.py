@@ -96,7 +96,7 @@ def ingest_observations(path, train, test):
 @lru_cache(maxsize=1)
 def _implementation_digest():
     source = hashlib.sha256()
-    for name in ('research.py', 'hourly_features.py', 'backtester.py', 'portfolio_policy.py', 'strategy_worker.py'):
+    for name in ('research.py', 'hourly_features.py', 'backtester.py', 'portfolio_policy.py', 'portfolio_events.py', 'portfolio_account.py', 'strategy_worker.py'):
         source.update(Path(__file__).with_name(name).read_bytes())
     return source.hexdigest()
 
@@ -145,20 +145,21 @@ def _persist_decisions(c, scope, data, newer, regime, champion, settings, sig):
         fact = c.execute("SELECT received_at,content_hash FROM usable_bars WHERE symbol=? AND t=?",
                          (sym, ts)).fetchone()
         received = pd.Timestamp(fact['received_at']) if fact and fact['received_at'] else None
+        decided_at = now()
         timely = (received is not None and 0 <= (received - t).total_seconds() <= 120
-                  and 0 <= (pd.Timestamp(now()) - received).total_seconds() <= 30)
+                  and 0 <= (pd.Timestamp(decided_at) - received).total_seconds() <= 30)
         target = int(sig.loc[sym, t] and row[guard]) if champion and flags and full and timely else None
         sid = champion['id'] if champion else None
         c.execute("""INSERT INTO decisions(symbol,t,strategy,target,atr,regime) VALUES(?,?,?,?,?,?)""",
                   (sym, ts, sid, target, float(row.atr) if pd.notna(row.atr) else None, observed))
         if champion:
             c.execute("""INSERT INTO decision_snapshots(symbol,t,strategy,lot,regime,feature_version,
-                          readiness_mask,history_ready,flags,rsi,received_at,content_hash)
-                          SELECT ?,?,?,?,?,?,?,?,?,?,received_at,content_hash FROM usable_bars
+                          readiness_mask,history_ready,flags,rsi,decided_at,received_at,content_hash)
+                          SELECT ?,?,?,?,?,?,?,?,?,?,?,received_at,content_hash FROM usable_bars
                           WHERE symbol=? AND t=? AND content_hash IS NOT NULL""",
                       (sym, ts, sid, key('lot', sym, ts), observed, FEATURE_VERSION, int(row.readiness_mask),
                        int(row.history_ready), json.dumps(flags) if flags is not None else None,
-                       float(row.rsi) if pd.notna(row.rsi) else None, sym, ts))
+                       float(row.rsi) if pd.notna(row.rsi) else None, decided_at, sym, ts))
 
 
 def review(path, s, train, test, regime, mutator, *, observations_committed=False):
