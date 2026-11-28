@@ -110,7 +110,9 @@ def decision_ok(decision, frame, quote, entry):
                 and decision.end < quote.at and decision.decided <= min(quote.at, frame.at)):
             return False
         duration = (decision.end - decision.start).total_seconds()
-        if not (0 < duration <= 3600
+        offset = (decision.start - frame.session_open).total_seconds()
+        if not (offset % 3600 == 0 and (duration == 3600 or decision.end == frame.session_close)
+                and 0 < duration <= 3600
                 and 0 <= (decision.published - decision.end).total_seconds() <= 120
                 and 0 <= (decision.decided - decision.published).total_seconds() <= 30
                 and (frame.at - decision.end).total_seconds() <= 300):
@@ -170,14 +172,20 @@ class Fill:
 
 class QuotePortfolio:
     """Deterministic immediate-fill model. Broker confirmations have separate provenance."""
-    def __init__(self, policy=None):
+    def __init__(self, policy=None, *, skip_entry_quotes=0, adverse_stop_atr=ZERO):
         self.policy = policy or ExecutionPolicy()
         self.account = Account(self.policy.capital, self.policy.daily_loss)
+        self.skip_entry_quotes = skip_entry_quotes
+        self.adverse_stop_atr = D(str(adverse_stop_atr))
+        if (type(skip_entry_quotes) is not int or skip_entry_quotes < 0
+                or not self.adverse_stop_atr.is_finite() or self.adverse_stop_atr < 0):
+            raise ValueError("invalid execution scenario")
         self.fills = []
         self.position = None  # entry fill, including frozen owner, cost basis and gap
         self.decisions = {}
         self.consumed = {}
-        self._quote_times = {}
+        self._quotes = {}
+        self._entry_quotes = {}
         self._last_frame = None
 
     def step(self, frame):
@@ -205,10 +213,11 @@ class QuotePortfolio:
             if not (frame.session_open <= quote.at <= frame.session_close
                     and frame.session_open <= frame.at <= frame.session_close):
                 continue
-            previous = self._quote_times.get(quote.symbol)
-            if previous is not None and quote.at < previous:
+            previous = self._quotes.get(quote.symbol)
+            if previous and (quote.at < previous.at or (quote.at == previous.at
+                             and (quote.bid, quote.ask) != (previous.bid, previous.ask))):
                 continue
-            self._quote_times[quote.symbol] = quote.at
+            self._quotes[quote.symbol] = quote
             quotes[quote.symbol] = quote
         entry = self.position
         held_quote = quotes.get(entry.symbol) if entry else None
@@ -229,9 +238,14 @@ class QuotePortfolio:
                             or entry.at < frame.session_open)
             reason = exit_reason(held_quote.bid, entry.price, entry.gap, session_exit, flat, halted)
             if reason:
-                fee = self.policy.order_fee(self.account.qty, held_quote.bid)
+                price = held_quote.bid
+                if reason == "stop" and self.adverse_stop_atr:
+                    stop, _ = protection_prices(entry.price, entry.gap)
+                    price = max(min(price, D(".000000001")),
+                                min(price, stop - self.adverse_stop_atr * entry.gap / STOP_ATR))
+                fee = self.policy.order_fee(self.account.qty, price)
                 fill = Fill(frame.at, entry.symbol, entry.strategy, entry.decision_end, "sell",
-                            self.account.qty, held_quote.bid, reason, fee, entry.gap)
+                            self.account.qty, price, reason, fee, entry.gap)
                 self.account.apply_fill("sell", fill.qty, fill.price, estimated_fee=fee)
                 self.account.mark(frame.at)
                 self.position = None
@@ -248,6 +262,15 @@ class QuotePortfolio:
                 gap = decision.atr * STOP_ATR
                 qty = entry_quantity(self.policy, self.account.equity, self.account.available,
                                      quote.bid, quote.ask, gap)
+                if qty and self.skip_entry_quotes:
+                    cut, previous, skipped = self._entry_quotes.get(symbol, (None, None, 0))
+                    if cut != decision.end:
+                        previous, skipped = None, 0
+                    if previous is None or quote.at > previous:
+                        skipped += 1
+                        self._entry_quotes[symbol] = (decision.end, quote.at, skipped)
+                    if skipped <= self.skip_entry_quotes:
+                        continue
                 if qty:
                     fee = self.policy.order_fee(qty, quote.ask)
                     fill = Fill(frame.at, symbol, decision.strategy, decision.end, "buy",
