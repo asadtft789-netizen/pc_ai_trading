@@ -4,3 +4,4 @@
 - Debit each development batch before proposal generation. A crash consumes that reservation. Unverified provider prices and spending limits keep external model requests disabled.
 - Keep the real paper HTTP adapter read-only. Local snapshots, synthetic profitability and successful unit tests cannot attest broker-side protection.
 - Keep the existing Oracle processes running. Their executable revision, external account holdings and protection status require fresh evidence before changing supervision.
+- Store experiment registrations, spent UTC-year slots and terminal certificate digests in the same operational ledger. Charge historical inspection before invoking estimators and seal missing or unfavorable outcomes. Require independent replay, model support and bounded null error/power before prospective eligibility. The 30-session calibration study exposed substantial false discovery under serial dependence.

@@ -13,25 +13,42 @@ def import_rules(path, legacy):
             c.execute('insert or ignore into reflections(id,subject,message,at) values(?,?,?,?)', (key('unscored', rid), rid, 'Legacy rule retained; no reliable decision-to-fill attribution. Not eligible for activation.', now()))
     return len(rows)
 
-def drift(path):
-    today = datetime.now(timezone.utc)
-    window = (today - timedelta(days=14)).isoformat()
-    prior = (today - timedelta(days=28)).isoformat()
+def drift(path, *, as_of=None):
+    """Descriptive gross episode monitor on fixed, disjoint UTC 28-day blocks."""
+    at = datetime.now(timezone.utc) if as_of is None else as_of
+    if at.tzinfo is None:
+        raise ValueError('UTC offset required')
+    epoch = datetime(1970,1,1,tzinfo=timezone.utc)
+    end = epoch + timedelta(days=((at-epoch).days//28)*28)
+    start, middle = end-timedelta(days=28), end-timedelta(days=14)
+    from experiment_store import append, read
     with db(path, True) as c:
-        for s in c.execute("select id,rule_ids from strategies where status in ('champion','retired')").fetchall():
-            rid = json.loads(s['rule_ids'])[1]
-            rows = c.execute('select sum(gross),max(at) from outcomes where strategy=? and at>=? group by lot having lot in (select id from lots where cast(qty as real)=0)', (s['id'], prior)).fetchall()
-            a = [p for p, t in rows if t < window]
-            b = [p for p, t in rows if t >= window]
-            if min(len(a), len(b)) < 20:
+        for s in c.execute("SELECT id FROM strategies WHERE status IN ('champion','retired')"):
+            sid = s['id']
+            ident = key('gross-drift-v1',sid,end.isoformat())
+            if read(c,'drift_review',ident) is not None:
                 continue
-            old = sum(a) / len(a)
-            new = sum(b) / len(b)
-            if old <= 0 or new > old * 0.8:
-                continue
-            msg = 'Confirmed paper gross expectancy declined at least 20% in two distinct 14-day windows; review, not proof the guard caused the change.'
-            c.execute('insert or ignore into reflections(id,subject,message,at) values(?,?,?,?)', (key('drift', rid, today.date().isoformat()), rid, msg, now()))
-            c.execute("update rules set state='review' where id=?", (rid,))
+            rows = c.execute("""SELECT sum(o.gross),max(o.at) FROM outcomes o JOIN lots l ON l.id=o.lot
+                WHERE o.strategy=? AND cast(l.qty AS REAL)=0 GROUP BY o.lot
+                HAVING julianday(max(o.at))>=julianday(?) AND julianday(max(o.at))<julianday(?)""",
+                (sid,start.isoformat(),end.isoformat())).fetchall()
+            earlier, recent = [], []
+            for pnl, closed in rows:
+                (earlier if datetime.fromisoformat(closed) < middle else recent).append(pnl)
+            complete = min(len(earlier),len(recent)) >= 20
+            old = sum(earlier)/len(earlier) if earlier else None
+            new = sum(recent)/len(recent) if recent else None
+            state = 'inconclusive'
+            if complete:
+                state = 'investigate' if old > 0 and new <= .8*old else 'observed'
+            append(c,'drift_review',ident,dict(origin='broker_paper_gross',strategy=sid,
+                   start=start.isoformat(),end=end.isoformat(),counts=[len(earlier),len(recent)],
+                   gross_means=[old,new],status=state))
+            if state == 'investigate':
+                c.execute("INSERT OR IGNORE INTO reflections(id,subject,message,at) VALUES(?,?,?,?)",
+                          (ident,sid,'Gross P&L per closed paper lot declined at least 20% across two fixed '
+                           '14-day windows. Investigate costs, attribution and market conditions.',now()))
+
 
 def learn_from_closes(path, mutator):
     """One read-only lot summary per lesson. Never assign a result to unrelated rules."""

@@ -1,0 +1,80 @@
+{
+  "purpose": "synthetic research only",
+  "alpha": 0.004166666666666667,
+  "annual_campaigns": 12,
+  "horizons": [
+    30,
+    60,
+    120,
+    240,
+    480
+  ],
+  "looks": [
+    60,
+    120,
+    240
+  ],
+  "spending": [
+    0.1,
+    0.2,
+    0.7
+  ],
+  "family_sizes": [
+    3,
+    12
+  ],
+  "replicates": 30000,
+  "seed": 39229141,
+  "daily_sd": 0.001,
+  "rho_limit": 0.8,
+  "planning_power": 0.8,
+  "standardized_effects": [
+    0.25,
+    0.5,
+    1.0
+  ],
+  "scenarios": [
+    [
+      "gaussian_moderate",
+      0.3,
+      0.8,
+      "normal"
+    ],
+    [
+      "gaussian_persistent",
+      0.7,
+      0.8,
+      "normal"
+    ],
+    [
+      "gaussian_envelope_boundary",
+      0.8,
+      0.2,
+      "normal"
+    ],
+    [
+      "clustered_skewed",
+      0.5,
+      0.8,
+      "clustered_skewed"
+    ],
+    [
+      "gaussian_beyond_envelope",
+      0.93,
+      0.8,
+      "normal"
+    ]
+  ],
+  "configurations": [
+    "global_null",
+    "one_true_null",
+    "half_true_null",
+    "half_sd",
+    "one_sd"
+  ],
+  "code_sha256": {
+    "f16_horizons.py": "8ba8acebe49ac703291dda97f559457a9ac253f98981a4b64ad00502ea8bbe35",
+    "inference_sensitivity.py": "bd779fb6a1e2e4e921e4179982946168945430f8ceb13f9b6318496fcda7d6e0"
+  },
+  "study_sha256": "d515dd003154ca27200851ecb7a33beeec7ef5af130e692c45824ea9dee7556c"
+}

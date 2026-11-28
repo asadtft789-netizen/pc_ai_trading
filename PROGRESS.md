@@ -6,8 +6,8 @@
 | WP2 | XNYS sessions, minute aggregation, anchor-specific regimes, history readiness and gap tests. | Long history reconstruction, corporate actions and measured prospective arrival latency. |
 | WP3 | Historical replay selects a single position from shared capital. Shadow policy v2 and the supervisor share stop/target prices; existing shadow campaigns retain v1. Fake quote gates and lot-owner preservation tested. | Canonical next-quote replay across historical, shadow and supervisor portfolios; decimal marked accounting. |
 | WP4 | Fake-broker reservation, ambiguity, reconciliation, gating and fencing coverage. Deployed adapter for this branch is read-only by design. | Broker identity, partial-fill independent protection, cancellation races and released paper writer. |
-| WP5 | Frozen development manifests, lane diagnostics, deterministic proposals and daily reservations. | Persistent job lifecycle, typed numerical strategy language, complete confirmatory registry and prospective attribution. |
-| WP6 | Restart, independent receipts, sidecar mismatch and calendar rollover tests. | Evidence certificates, sole activation authority and integrated end-to-end replay. |
+| WP5 | Frozen development manifests, lane diagnostics, daily reservations, purged folds, holdout ledger and registered prospective comparison families. | Persistent job lifecycle, typed numerical strategy language, canonical prospective attribution and a supported calibration for the intended market process. |
+| WP6 | Restart, independent receipts, sidecar mismatch, calendar rollover and immutable evidence certificate tests. | Trusted producer integration, independent replay, supervisor certificate consumption and release verification. |
 | WP7 | Read-only dashboard, verified environment pins, local backup verification, resource admission and soak harness. | Linux acceptance, resource measurements, service isolation, off-host recovery and external heartbeat. |
 | WP8 | Strict-key Oracle inventory only. | All release gates, 48 elapsed hours on a frozen eligible candidate, two actual controlled sessions, 21-day evaluation and 30-session campaign. |
 

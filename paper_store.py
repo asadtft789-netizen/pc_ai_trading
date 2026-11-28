@@ -100,6 +100,8 @@ def init(path):
                 from market_observations import install_observation_contract
                 install_observation_contract(c)
                 c.execute(f'PRAGMA user_version={SCHEMA_VERSION}')
+            from experiment_store import install
+            install(c)
         if c.execute('PRAGMA journal_mode=WAL').fetchone()[0] != 'wal':
             raise RuntimeError('operational store requires WAL')
     return path

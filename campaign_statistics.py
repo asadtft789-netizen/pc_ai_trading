@@ -18,6 +18,8 @@ def paired_result(calendar, candidate, control, turnover, capital, episodes, dif
         raise ValueError("invalid campaign capital or seed")
     if any(set(series) != set(days) for series in (candidate, control, turnover)):
         return {"status": "inconclusive", "reason": "incomplete_calendar"}
+    if any(type(count) is not int or count < 0 for count in (episodes, differing_episodes)):
+        return {"status": "invalid", "reason": "invalid_episode_count"}
     if episodes < 20 or differing_episodes < 10:
         return {"status": "inconclusive", "reason": "sparse_comparison"}
     pnl, benchmark, traded = (np.array([series[d] for d in days], dtype=float)
@@ -32,12 +34,15 @@ def paired_result(calendar, candidate, control, turnover, capital, episodes, dif
     block_p = {}
     rng = np.random.default_rng(seed)
     for length in BLOCK_LENGTHS:
+        # Every registered length divides 30. Precompute circular sums to avoid
+        # materializing a (resample, block, day) tensor on the research worker.
+        block_sums = np.array([centered[(start + np.arange(length)) % len(days)].sum()
+                               for start in range(len(days))])
         exceeds = 0
-        for offset in range(0, RESAMPLES, 512):
-            n = min(512, RESAMPLES - offset)
+        for offset in range(0, RESAMPLES, 2048):
+            n = min(2048, RESAMPLES - offset)
             starts = rng.integers(0, len(days), size=(n, (len(days) + length - 1) // length))
-            indices = (starts[:, :, None] + np.arange(length)) % len(days)
-            means = centered[indices.reshape(n, -1)[:, :len(days)]].mean(axis=1)
+            means = block_sums[starts].sum(axis=1) / len(days)
             exceeds += int(np.count_nonzero(means >= observed))
         block_p[length] = (1 + exceeds) / (RESAMPLES + 1)
     return {"status": "measured", "seed": seed, "resamples": RESAMPLES, "mean_increment": observed,

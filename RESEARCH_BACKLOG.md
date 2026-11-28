@@ -4,3 +4,7 @@
 3. Register annual campaign spend, prospective calendars, locked comparators and manifests before observing outcomes. Preserve inspected holdouts and failed trials.
 4. Validate null and serial-dependence behavior over multiple independently seeded datasets. Exercise concentration, cost, delay, gap and ablation protocols.
 5. Introduce typed features and bounded logistic baselines only after data and portfolio equivalence tests pass. Keep provider budgets explicit.
+
+The Agent 4 registry and reserve ledger implement item 3. For item 4, extend the documented Gaussian family simulations to independently justified market models, asymmetric and heavy-tailed innovations, partial nulls and nonstationary dependence. The initial serial-null study produced 25/256 false-positive families. Block validation claims for unsupported designs.
+
+The F16 horizon study quantifies the sample-size cost of persistence and evaluates fixed and scheduled analyses under explicit assumptions. Independently justify an external paired-return model or covariance envelope before locking the validation study and selecting a new prospective endpoint. See [the horizon and sequential design](handoffs/F16_HORIZON_AND_SEQUENTIAL_DESIGN.md).
