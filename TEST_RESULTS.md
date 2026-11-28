@@ -21,3 +21,5 @@ At the common commit, the pinned CPython 3.12 environment passed pip check and a
 At development revision 8e55bc5, all 111 offline tests passed in 7.594 seconds. The local encrypted-storage drill restored both databases. Unit definitions passed static systemd 257 user-mode parsing with executable stubs and sysusers dry run. Chromium at a Pixel 7 viewport passed layout, health rendering, paper labeling and navigation. Dependency audit and redacted Gitleaks scans passed after six scoped vendored false positives were reviewed.
 
 Integrated smoke at 8e55bc5 reached receipt sequence 1, verified one killed supervisor and fake broker recovery, and restored both databases after 16.21 continuous elapsed seconds. This does not satisfy the 48-hour acceptance gate. No Oracle, private Android route, real systemd runtime, off-host storage or external alert was exercised. See handoffs/AGENT_5.md.
+
+The corrected GitHub Actions run passed the application tests, Ubuntu 24.04 static systemd check, dependency audit and secret scan. [Run 46147266471](https://github.com/asadtft789-netizen/pc_ai_trading/actions/runs/46147266471).
